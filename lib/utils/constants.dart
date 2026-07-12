@@ -22,6 +22,9 @@ class AppConstants {
   /// 设备发现 UDP 广播端口
   static const int discoveryPort = 45670;
 
+  /// 设备发现组播地址（iOS 不支持 UDP 广播，使用组播替代）
+  static const String multicastGroup = '224.0.0.250';
+
   /// 语音数据 UDP 端口
   static const int voicePort = 45671;
 

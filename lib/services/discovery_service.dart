@@ -17,6 +17,10 @@ class DiscoveryService {
   String deviceName;
   String _localIp = '';
 
+  /// 组播地址 — iOS 不支持 UDP 广播，使用组播进行设备发现
+  final InternetAddress _multicastAddr =
+      InternetAddress(AppConstants.multicastGroup);
+
   final Map<String, Device> _devices = {};
   final StreamController<List<Device>> _deviceStream =
       StreamController<List<Device>>.broadcast();
@@ -53,6 +57,13 @@ class DiscoveryService {
         reuseAddress: true,
       );
       _socket!.broadcastEnabled = true;
+      // 加入组播组（iOS 必需，其他平台也兼容）
+      try {
+        _socket!.joinMulticast(_multicastAddr);
+        _log('已加入组播组 ${AppConstants.multicastGroup}');
+      } catch (e) {
+        _log('加入组播组失败: $e');
+      }
       _socket!.listen(_handleDatagram);
 
       _log('发现服务已启动 (端口 ${AppConstants.discoveryPort})');
@@ -125,6 +136,12 @@ class DiscoveryService {
           reuseAddress: true,
         );
         _socket!.broadcastEnabled = true;
+        // 重新加入组播组
+        try {
+          _socket!.joinMulticast(_multicastAddr);
+        } catch (e) {
+          _log('重新加入组播组失败: $e');
+        }
         _socket!.listen(_handleDatagram);
       } catch (e) {
         _log('重新绑定 socket 失败: $e');
@@ -137,12 +154,15 @@ class DiscoveryService {
 
   /// 处理接收到的 UDP 数据报
   void _handleDatagram(RawSocketEvent event) {
-    if (event == RawSocketEvent.read) {
-      final datagram = _socket?.receive();
-      if (datagram == null) return;
+    if (event != RawSocketEvent.read) return;
 
-      // 过滤本机消息
-      if (datagram.address.address == _localIp) return;
+    // 循环读取所有可用数据报，防止丢包
+    while (true) {
+      final datagram = _socket?.receive();
+      if (datagram == null) break;
+
+      // 过滤本机消息（IP 过滤，_parseMessage 中还有 deviceId 过滤双保险）
+      if (_localIp.isNotEmpty && datagram.address.address == _localIp) continue;
 
       final message = utf8.decode(datagram.data);
       _parseMessage(message, datagram.address);
@@ -156,6 +176,9 @@ class DiscoveryService {
 
     final prefix = parts[0];
     final senderId = parts[1];
+
+    // 过滤本机消息（双保险：IP 过滤 + deviceId 过滤）
+    if (senderId == deviceId) return;
 
     switch (prefix) {
       case AppConstants.prefixDiscovery:
@@ -300,15 +323,14 @@ class DiscoveryService {
     _broadcast(data);
   }
 
-  /// UDP 广播（同时发送到 255.255.255.255 和子网广播地址）
+  /// 发送数据（组播 + 子网广播兼容）
   void _broadcast(List<int> data) {
     try {
-      // 全局广播
-      _socket?.send(data, InternetAddress('255.255.255.255'),
-          AppConstants.discoveryPort);
+      // 发送到组播地址（iOS 主要靠此方式发现设备）
+      _socket?.send(data, _multicastAddr, AppConstants.discoveryPort);
 
-      // 子网广播（假设 /24）
-      if (_localIp.isNotEmpty) {
+      // 非 iOS 平台同时发送子网广播（兼容旧版本/增强覆盖）
+      if (!Platform.isIOS && _localIp.isNotEmpty) {
         final parts = _localIp.split('.');
         if (parts.length == 4) {
           parts[3] = '255';
@@ -318,7 +340,7 @@ class DiscoveryService {
         }
       }
     } catch (e) {
-      // 广播失败静默处理
+      // 发送失败静默处理
     }
   }
 
@@ -375,6 +397,10 @@ class DiscoveryService {
     _connectivitySub = null;
     _heartbeatTimer?.cancel();
     _cleanupTimer?.cancel();
+    // 离开组播组
+    try {
+      _socket?.leaveMulticast(_multicastAddr);
+    } catch (_) {}
     _socket?.close();
     _socket = null;
     _log('发现服务已停止');

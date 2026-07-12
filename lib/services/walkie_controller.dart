@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show ChangeNotifier, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -21,7 +22,7 @@ enum TalkStatus { idle, transmitting, receiving }
 enum ConnectionStatus { disconnected, connecting, connected }
 
 /// 对讲机核心控制器 — 统一管理所有服务与状态
-class WalkieController extends ChangeNotifier {
+class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
   late final DiscoveryService _discovery;
   late final VoiceTransceiver _transceiver;
   late final AudioService _audio;
@@ -56,6 +57,9 @@ class WalkieController extends ChangeNotifier {
 
   // ── 权限状态 ──
   bool _micPermissionDenied = false;
+
+  /// 权限重新检查回调（从设置页返回后仍被拒绝时通知 UI）
+  void Function()? onPermissionRecheck;
 
   WalkieController({String? deviceId, String? deviceName})
       : _deviceId = deviceId ?? const Uuid().v4(),
@@ -99,6 +103,9 @@ class WalkieController extends ChangeNotifier {
 
   /// 初始化
   Future<void> init() async {
+    // 注册生命周期观察者（监听 App 前后台切换）
+    WidgetsBinding.instance.addObserver(this);
+
     _connStatus = ConnectionStatus.connecting;
     _log('正在初始化...');
     notifyListeners();
@@ -252,6 +259,13 @@ class WalkieController extends ChangeNotifier {
         return;
       }
     } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+      // iOS: 先检查当前状态（用户可能已在设置中授权）
+      final currentStatus = await Permission.microphone.status;
+      if (currentStatus.isGranted) {
+        _micPermissionDenied = false;
+        return;
+      }
+      // 未授权，尝试请求
       final micStatus = await Permission.microphone.request();
       if (!micStatus.isGranted) {
         _micPermissionDenied = true;
@@ -261,6 +275,29 @@ class WalkieController extends ChangeNotifier {
       }
     }
     // Windows 不需要显式权限请求
+  }
+
+  /// App 生命周期变化 — 从设置页返回时重新检查权限
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _recheckMicPermission();
+    }
+  }
+
+  /// 重新检查麦克风权限（从设置页返回后调用）
+  Future<void> _recheckMicPermission() async {
+    if (!_micPermissionDenied) return;
+
+    final status = await Permission.microphone.status;
+    if (status.isGranted) {
+      _micPermissionDenied = false;
+      _log('麦克风权限已授予');
+      notifyListeners();
+    } else {
+      // 权限仍被拒绝，通知 UI 重新引导用户
+      onPermissionRecheck?.call();
+    }
   }
 
   /// 打开系统应用设置页（引导用户手动授权）
@@ -525,6 +562,7 @@ class WalkieController extends ChangeNotifier {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _audioConflict.dispose();
     _bgService.stopService();
     _audio.dispose();

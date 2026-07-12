@@ -28,6 +28,10 @@ class _WalkieScreenState extends State<WalkieScreen> {
   @override
   void initState() {
     super.initState();
+    // 从设置页返回后若权限仍被拒绝，重新弹出引导弹窗
+    widget.controller.onPermissionRecheck = () {
+      if (mounted) _showPermissionDialog();
+    };
     _init();
     WakelockPlus.enable();
   }
@@ -96,6 +100,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
 
   @override
   void dispose() {
+    widget.controller.onPermissionRecheck = null;
     WakelockPlus.disable();
     super.dispose();
   }
