@@ -180,13 +180,16 @@ class VoiceTransceiver {
       () => _flushJitterBuffer(senderIp),
     );
 
-    // 如果 buffer 积累超过 10 个包，立即刷新
-    if (_jitterBuffer[senderIp]!.length >= 10) {
+    // 如果 buffer 积累超过 5 个包，立即刷新
+    if (_jitterBuffer[senderIp]!.length >= 5) {
       _flushJitterBuffer(senderIp);
     }
   }
 
-  /// 刷新 jitter buffer — 按 seq 排序后交给播放器
+  /// 刷新 jitter buffer — 按 seq 排序后逐帧交给播放器
+  ///
+  /// 注意：Opus 帧是变长的，不能合并成一个 blob 传给解码器，
+  /// 否则 decode() 只会解码第一帧，其余数据全部丢失。
   void _flushJitterBuffer(String senderIp) {
     final buffer = _jitterBuffer[senderIp];
     if (buffer == null || buffer.isEmpty) return;
@@ -194,20 +197,12 @@ class VoiceTransceiver {
     // 按 seq 排序
     buffer.sort((a, b) => a.seq.compareTo(b.seq));
 
-    // 合并所有 PCM 数据
-    int totalLen = 0;
+    // 逐帧传递（不合并！每个 Opus 帧独立解码）
     for (final pkt in buffer) {
-      totalLen += pkt.data.length;
-    }
-    final merged = Uint8List(totalLen);
-    int offset = 0;
-    for (final pkt in buffer) {
-      merged.setRange(offset, offset + pkt.data.length, pkt.data);
-      offset += pkt.data.length;
+      onAudioData?.call(senderIp, pkt.data);
     }
 
     buffer.clear();
-    onAudioData?.call(senderIp, merged);
   }
 
   /// 更新对端设备列表

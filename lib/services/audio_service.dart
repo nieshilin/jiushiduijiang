@@ -41,6 +41,15 @@ class AudioService {
   // 按发送者IP分组的PCM缓冲
   final Map<String, List<int>> _pcmBuffers = {};
   Timer? _playbackFlushTimer;
+  // 预缓冲标志：首次接收时等待足够数据再开始播放，避免卡顿
+  bool _preBuffering = true;
+
+  // 预缓冲阈值：300ms 的 PCM 数据 (16kHz * 16bit * 1ch * 0.3s = 9600 bytes)
+  static const int _preBufferBytes = 9600;
+  // 每次刷新最大取出：200ms (6400 bytes)，留余量给下次
+  static const int _maxFlushBytes = 6400;
+  // 每次刷新最小取出：50ms (1600 bytes)，避免太碎
+  static const int _minFlushBytes = 1600;
 
   bool get isRecording => _isRecording;
   bool get isMuted => _isMuted;
@@ -251,7 +260,7 @@ class AudioService {
     try {
       pcmSamples = _opusDecoder!.decode(input: opusData);
     } catch (e) {
-      _log('Opus 解码失败: $e');
+      _log('❌ Opus 解码失败: $e');
       return;
     }
 
@@ -266,26 +275,39 @@ class AudioService {
     buffer.addAll(pcmBytes);
     _pcmBuffers[senderIp] = buffer;
 
-    if (_playbackFlushTimer == null) {
-      _flushPlaybackBuffer(force: true);
-      _playbackFlushTimer = Timer.periodic(
-        const Duration(milliseconds: 100),
-        (_) => _flushPlaybackBuffer(),
-      );
-    }
+    // 启动定时刷新（不立即播放，等预缓冲积累足够数据）
+    _playbackFlushTimer ??= Timer.periodic(
+      const Duration(milliseconds: 50),
+      (_) => _flushPlaybackBuffer(),
+    );
   }
 
   /// 将缓冲的 PCM 数据转为 WAV 并加入播放队列
-  void _flushPlaybackBuffer({bool force = false}) {
+  ///
+  /// 策略：
+  /// 1. 预缓冲：首次等待 300ms 数据积累后再开始播放，消除后续卡顿
+  /// 2. 每次最多取 200ms (6400 bytes)，保留剩余给下次刷新
+  /// 3. 50ms 刷新间隔，确保播放队列始终有数据
+  void _flushPlaybackBuffer() {
     for (final entry in _pcmBuffers.entries) {
       final buffer = entry.value;
       if (buffer.isEmpty) continue;
 
-      final minBytes = force ? 1 : 6400; // 200ms @ 16kHz 16bit mono
-      if (buffer.length < minBytes) continue;
+      // 预缓冲阶段：等待足够数据
+      if (_preBuffering) {
+        if (buffer.length < _preBufferBytes) continue;
+        _preBuffering = false;
+        _log('🔊 预缓冲完成 (${buffer.length} bytes), 开始播放');
+      }
 
-      final pcmBytes = Uint8List.fromList(buffer);
-      buffer.clear();
+      // 取出一块 PCM 数据（最多 200ms）
+      final flushLen = buffer.length > _maxFlushBytes
+          ? _maxFlushBytes
+          : (buffer.length >= _minFlushBytes ? buffer.length : 0);
+      if (flushLen == 0) continue;
+
+      final pcmBytes = Uint8List.fromList(buffer.sublist(0, flushLen));
+      buffer.removeRange(0, flushLen);
 
       final wavBytes = WavUtils.buildWav(pcmBytes);
       _playbackQueue.add(wavBytes);
@@ -293,10 +315,12 @@ class AudioService {
 
     _tryPlayNext();
 
+    // 所有缓冲清空且队列空 → 停止定时器
     final allEmpty = _pcmBuffers.values.every((b) => b.isEmpty);
     if (allEmpty && _playbackQueue.isEmpty) {
       _playbackFlushTimer?.cancel();
       _playbackFlushTimer = null;
+      _preBuffering = true; // 重置预缓冲，为下次通话准备
     }
   }
 
@@ -319,6 +343,7 @@ class AudioService {
   /// 通话开始 — 准备接收
   void onVoiceStartReceived(String senderIp) {
     _pcmBuffers[senderIp] = <int>[];
+    _preBuffering = true; // 新通话开始，重新预缓冲
   }
 
   /// 通话结束 — 刷新剩余缓冲
@@ -351,6 +376,7 @@ class AudioService {
     _pcmBuffers.clear();
     _playbackFlushTimer?.cancel();
     _playbackFlushTimer = null;
+    _preBuffering = true;
     _isPlaying = false;
     await _player.stop();
   }
