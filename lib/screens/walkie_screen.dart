@@ -4,12 +4,10 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
 import 'package:jiudhiduijiang/widgets/led_display.dart';
-import 'package:jiudhiduijiang/widgets/status_indicator.dart';
-import 'package:jiudhiduijiang/widgets/volume_control.dart';
 import 'package:jiudhiduijiang/widgets/ptt_button.dart';
 import 'package:jiudhiduijiang/widgets/device_list.dart';
 
-/// 对讲机主界面 — 单一页面，无导航栏
+/// 对讲机主界面 — 现代极简移动端风格
 class WalkieScreen extends StatefulWidget {
   final WalkieController controller;
 
@@ -27,7 +25,6 @@ class _WalkieScreenState extends State<WalkieScreen> {
   void initState() {
     super.initState();
     _init();
-    // 保持屏幕常亮
     WakelockPlus.enable();
   }
 
@@ -46,66 +43,74 @@ class _WalkieScreenState extends State<WalkieScreen> {
     super.dispose();
   }
 
-  /// 获取状态文本
-  String _getStatusText(WalkieController c) {
+  String _getChannelName(WalkieController c) {
+    return '默认频道';
+  }
+
+  String _getSpeakerText(WalkieController c) {
     switch (c.talkStatus) {
-      case TalkStatus.idle:
-        return 'STANDBY';
       case TalkStatus.transmitting:
-        return '>> TX LIVE';
+        return '你正在讲话';
       case TalkStatus.receiving:
-        return '<< RX: ${c.receivingFrom}';
+        return '${c.receivingFrom} 正在讲话';
+      case TalkStatus.idle:
+        return '频道空闲';
     }
   }
 
-  /// 获取连接文本
-  String _getConnectionText(WalkieController c) {
-    switch (c.connStatus) {
-      case ConnectionStatus.disconnected:
-        return 'OFFLINE';
-      case ConnectionStatus.connecting:
-        return 'CONNECTING...';
-      case ConnectionStatus.connected:
-        return 'CONNECTED';
+  String _getStatusSubtext(WalkieController c) {
+    switch (c.talkStatus) {
+      case TalkStatus.transmitting:
+        return '松开按钮结束通话';
+      case TalkStatus.receiving:
+        return '接收语音中';
+      case TalkStatus.idle:
+        return c.connStatus == ConnectionStatus.connected
+            ? '在线 · ${c.onlineCount} 人'
+            : '连接中...';
     }
   }
 
-  /// 显示设备名称编辑对话框
   void _showNameEditor(BuildContext context, WalkieController c) {
     final controller = TextEditingController(text: c.deviceName);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: WalkieTheme.surfaceDark,
-        title: Text(
+        backgroundColor: WalkieTheme.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: WalkieTheme.border),
+        ),
+        title: const Text(
           '设置设备名称',
           style: TextStyle(
             color: WalkieTheme.textPrimary,
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
           ),
         ),
         content: TextField(
           controller: controller,
           autofocus: true,
           maxLength: 20,
-          style: TextStyle(color: WalkieTheme.textPrimary),
-          decoration: InputDecoration(
+          style: const TextStyle(color: WalkieTheme.textPrimary),
+          decoration: const InputDecoration(
             hintText: '输入设备名称',
-            hintStyle: TextStyle(color: WalkieTheme.textDim),
+            hintStyle: TextStyle(color: WalkieTheme.textMuted),
             enabledBorder: UnderlineInputBorder(
               borderSide: BorderSide(color: WalkieTheme.border),
             ),
             focusedBorder: UnderlineInputBorder(
-              borderSide: BorderSide(color: WalkieTheme.ledGreen),
+              borderSide: BorderSide(color: WalkieTheme.accent),
             ),
-            counterStyle: TextStyle(color: WalkieTheme.textDim),
+            counterStyle: TextStyle(color: WalkieTheme.textMuted),
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: Text('取消', style: TextStyle(color: WalkieTheme.textSecondary)),
+            child: const Text('取消',
+                style: TextStyle(color: WalkieTheme.textSecondary)),
           ),
           TextButton(
             onPressed: () {
@@ -115,7 +120,8 @@ class _WalkieScreenState extends State<WalkieScreen> {
               }
               Navigator.pop(ctx);
             },
-            child: Text('确定', style: TextStyle(color: WalkieTheme.ledGreen)),
+            child: const Text('确定',
+                style: TextStyle(color: WalkieTheme.accent)),
           ),
         ],
       ),
@@ -132,222 +138,175 @@ class _WalkieScreenState extends State<WalkieScreen> {
           builder: (context, _) {
             final c = widget.controller;
 
-            // 初始化错误
             if (_initError != null) {
               return _buildErrorView();
             }
 
-            // 初始化中
             if (!_isInitialized) {
               return _buildLoadingView();
             }
 
-            return _buildWalkieBody(c);
+            return _buildMainBody(c);
           },
         ),
       ),
     );
   }
 
-  /// 构建对讲机机身
-  Widget _buildWalkieBody(WalkieController c) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            WalkieTheme.surfaceDark,
-            WalkieTheme.background,
-          ],
-        ),
-      ),
-      child: Column(
-        children: [
-          // 顶部天线装饰
-          _buildAntenna(),
-          // 顶部工具栏（设备名编辑）
-          _buildTopBar(c),
-          // LED 显示屏
-          LedDisplay(
-            deviceId: c.deviceId,
-            deviceName: c.deviceName,
-            localIp: c.localIp,
-            onlineCount: c.onlineCount,
-            statusText: _getStatusText(c),
-            connectionText: _getConnectionText(c),
-            volume: c.volume,
-            isMuted: c.isMuted,
-          ),
-          // 状态指示灯
-          StatusIndicator(
-            isTransmitting: c.talkStatus == TalkStatus.transmitting,
-            isReceiving: c.talkStatus == TalkStatus.receiving,
-            isConnected: c.connStatus == ConnectionStatus.connected,
-          ),
-          const SizedBox(height: 4),
-          // 音量控制
-          VolumeControl(
-            volume: c.volume,
-            isMuted: c.isMuted,
-            onVolumeChanged: c.setVolume,
-            onMuteToggle: c.toggleMute,
-          ),
-          const SizedBox(height: 8),
-          // 设备列表
-          DeviceList(devices: c.devices),
-          const SizedBox(height: 8),
-          // 接收提示
-          if (c.talkStatus == TalkStatus.receiving)
-            _buildReceivingIndicator(c.receivingFrom),
-          // 弹性间距
-          const Spacer(),
-          // PTT 按钮
-          PttButton(
-            isPressed: c.isPTTActive,
-            isTransmitting: c.talkStatus == TalkStatus.transmitting,
-            label: 'PTT',
-            onPTTChanged: (pressed) {
-              if (pressed) {
-                c.ptDown();
-              } else {
-                c.ptUp();
-              }
-            },
-          ),
-          const SizedBox(height: 24),
-          // 底部日志
-          if (c.lastLog.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                c.lastLog,
-                style: TextStyle(
-                  fontFamily: WalkieTheme.fontMono,
-                  fontSize: 9,
-                  color: WalkieTheme.textDim,
-                ),
-              ),
+  Widget _buildMainBody(WalkieController c) {
+    return Column(
+      children: [
+        // 顶部状态栏 + 频道选择
+        _buildTopBar(c),
+        const SizedBox(height: 24),
+        // 绿色 LCD 大屏
+        Expanded(
+          flex: 5,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: LedDisplay(
+              deviceId: c.deviceId,
+              deviceName: c.deviceName,
+              onlineCount: c.onlineCount,
+              speakerText: _getSpeakerText(c),
+              statusSubtext: _getStatusSubtext(c),
+              isTransmitting: c.talkStatus == TalkStatus.transmitting,
+              isReceiving: c.talkStatus == TalkStatus.receiving,
+              isConnected: c.connStatus == ConnectionStatus.connected,
             ),
-        ],
-      ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        // 在线成员列表
+        Expanded(
+          flex: 3,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: DeviceList(
+              devices: c.devices,
+              localDeviceName: c.deviceName,
+              speakingName: c.talkStatus == TalkStatus.transmitting
+                  ? c.deviceName
+                  : c.receivingFrom,
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        // 大圆 PTT 按钮
+        PttButton(
+          isPressed: c.isPTTActive,
+          isTransmitting: c.talkStatus == TalkStatus.transmitting,
+          onPTTChanged: (pressed) {
+            if (pressed) {
+              c.ptDown();
+            } else {
+              c.ptUp();
+            }
+          },
+        ),
+        const SizedBox(height: 36),
+      ],
     );
   }
 
-  /// 天线装饰
-  Widget _buildAntenna() {
-    return Container(
-      width: 6,
-      height: 28,
-      margin: const EdgeInsets.only(top: 4),
-      decoration: BoxDecoration(
-        color: WalkieTheme.surfaceLight,
-        borderRadius: BorderRadius.circular(3),
-        border: Border.all(color: WalkieTheme.border, width: 1),
-      ),
-    );
-  }
-
-  /// 顶部工具栏
   Widget _buildTopBar(WalkieController c) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            '就是对讲',
-            style: TextStyle(
-              fontFamily: WalkieTheme.fontMono,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              color: WalkieTheme.textDim,
-              letterSpacing: 2,
-            ),
-          ),
+          // 改名
           GestureDetector(
             onTap: () => _showNameEditor(context, c),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               decoration: BoxDecoration(
-                color: WalkieTheme.surfaceMid,
-                borderRadius: BorderRadius.circular(6),
+                color: WalkieTheme.surfaceElevated,
+                borderRadius: BorderRadius.circular(20),
                 border: Border.all(color: WalkieTheme.border),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.edit, size: 12, color: WalkieTheme.textSecondary),
-                  const SizedBox(width: 4),
+                  const Icon(Icons.edit, size: 14, color: WalkieTheme.textSecondary),
+                  const SizedBox(width: 6),
                   Text(
-                    '改名',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: WalkieTheme.textSecondary,
+                    c.deviceName,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: WalkieTheme.textPrimary,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ],
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  /// 接收中指示器
-  Widget _buildReceivingIndicator(String fromName) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: WalkieTheme.ledGreen.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(
-          color: WalkieTheme.ledGreen.withValues(alpha: 0.3),
-        ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.graphic_eq, size: 16, color: WalkieTheme.ledGreen),
-          const SizedBox(width: 8),
-          Text(
-            '收到 $fromName 的语音',
-            style: TextStyle(
-              fontFamily: WalkieTheme.fontMono,
-              fontSize: 11,
-              color: WalkieTheme.ledGreen,
-              fontWeight: FontWeight.bold,
+          // 频道选择器
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: WalkieTheme.surfaceElevated,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: WalkieTheme.border),
             ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.wifi_tethering,
+                    size: 14, color: WalkieTheme.accent),
+                const SizedBox(width: 6),
+                Text(
+                  _getChannelName(c),
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: WalkieTheme.textPrimary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.keyboard_arrow_down,
+                    size: 16, color: WalkieTheme.textSecondary),
+              ],
+            ),
+          ),
+          // 更多菜单（占位）
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: WalkieTheme.surfaceElevated,
+              shape: BoxShape.circle,
+              border: Border.all(color: WalkieTheme.border),
+            ),
+            child: const Icon(Icons.more_horiz,
+                size: 20, color: WalkieTheme.textSecondary),
           ),
         ],
       ),
     );
   }
 
-  /// 加载视图
   Widget _buildLoadingView() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(
+          SizedBox(
             width: 40,
             height: 40,
             child: CircularProgressIndicator(
-              color: WalkieTheme.ledGreen,
+              color: WalkieTheme.accent,
               strokeWidth: 3,
             ),
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: 16),
           Text(
-            '正在连接局域网...',
+            '正在连接频道...',
             style: TextStyle(
-              fontFamily: WalkieTheme.fontMono,
-              fontSize: 12,
+              fontSize: 14,
               color: WalkieTheme.textSecondary,
-              letterSpacing: 1,
+              fontWeight: FontWeight.w500,
             ),
           ),
         ],
@@ -355,7 +314,6 @@ class _WalkieScreenState extends State<WalkieScreen> {
     );
   }
 
-  /// 错误视图
   Widget _buildErrorView() {
     return Center(
       child: Padding(
@@ -363,21 +321,21 @@ class _WalkieScreenState extends State<WalkieScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.error_outline, size: 48, color: WalkieTheme.ledRed),
+            const Icon(Icons.error_outline, size: 48, color: WalkieTheme.txRed),
             const SizedBox(height: 16),
-            Text(
+            const Text(
               '初始化失败',
               style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
-                color: WalkieTheme.ledRed,
+                color: WalkieTheme.txRed,
               ),
             ),
             const SizedBox(height: 8),
             Text(
               _initError ?? '',
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 12,
                 color: WalkieTheme.textSecondary,
               ),
@@ -392,8 +350,8 @@ class _WalkieScreenState extends State<WalkieScreen> {
                 _init();
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: WalkieTheme.surfaceLight,
-                foregroundColor: WalkieTheme.ledGreen,
+                backgroundColor: WalkieTheme.surfaceElevated,
+                foregroundColor: WalkieTheme.accent,
               ),
               child: const Text('重试'),
             ),

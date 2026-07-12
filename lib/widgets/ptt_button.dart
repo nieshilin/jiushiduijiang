@@ -1,20 +1,18 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 
-/// 大尺寸 PTT 按住说话按钮
-/// 按下时有震动/灯光反馈动画
+/// 现代大圆 PTT 按钮 — 底部按住说话
 class PttButton extends StatefulWidget {
   final bool isPressed;
   final bool isTransmitting;
-  final String label;
   final Function(bool) onPTTChanged;
 
   const PttButton({
     super.key,
     required this.isPressed,
     required this.isTransmitting,
-    required this.label,
     required this.onPTTChanged,
   });
 
@@ -23,7 +21,7 @@ class PttButton extends StatefulWidget {
 }
 
 class _PttButtonState extends State<PttButton>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late AnimationController _glowController;
   late AnimationController _pressController;
   late Animation<double> _scaleAnimation;
@@ -32,7 +30,7 @@ class _PttButtonState extends State<PttButton>
   void initState() {
     super.initState();
     _glowController = AnimationController(
-      duration: const Duration(milliseconds: 200),
+      duration: const Duration(milliseconds: 900),
       vsync: this,
     );
     _pressController = AnimationController(
@@ -88,89 +86,154 @@ class _PttButtonState extends State<PttButton>
         builder: (context, child) {
           final glowValue = widget.isTransmitting ? _glowController.value : 0.0;
           final scale = _scaleAnimation.value;
-          final buttonSize = 180.0 * scale;
+          final buttonSize = 170.0 * scale;
 
-          return Container(
-            width: buttonSize,
-            height: buttonSize,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: widget.isTransmitting
-                    ? [
-                        WalkieTheme.pttPressed,
-                        WalkieTheme.pttPressed.withValues(alpha: 0.7),
-                        WalkieTheme.pttIdle,
-                      ]
-                    : [
-                        WalkieTheme.surfaceLight,
-                        WalkieTheme.surfaceMid,
-                        WalkieTheme.surfaceDark,
-                      ],
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              // 外圈光晕
+              if (widget.isTransmitting)
+                Container(
+                  width: buttonSize + 50,
+                  height: buttonSize + 50,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: WalkieTheme.accentGlow.withValues(
+                      alpha: 0.12 + glowValue * 0.18,
+                    ),
+                  ),
+                ),
+              // 外圈绿色环
+              Container(
+                width: buttonSize + 12,
+                height: buttonSize + 12,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const SweepGradient(
+                    colors: [
+                      WalkieTheme.accent,
+                      WalkieTheme.accentDim,
+                      WalkieTheme.accent,
+                    ],
+                  ),
+                  boxShadow: WalkieTheme.pttGlow(widget.isTransmitting),
+                ),
               ),
-              border: Border.all(
-                color: widget.isTransmitting
-                    ? WalkieTheme.pttPressed
-                    : WalkieTheme.border,
-                width: 3,
+              // 内圈主体
+              Container(
+                width: buttonSize,
+                height: buttonSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: WalkieTheme.pttGradient,
+                  border: Border.all(
+                    color: widget.isTransmitting
+                        ? WalkieTheme.accent.withValues(alpha: 0.5)
+                        : WalkieTheme.border,
+                    width: 2,
+                  ),
+                ),
+                child: ClipOval(
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // 点阵背景
+                      CustomPaint(
+                        size: Size(buttonSize, buttonSize),
+                        painter: _DotMatrixPainter(
+                          dotColor: widget.isTransmitting
+                              ? WalkieTheme.accent.withValues(alpha: 0.25)
+                              : WalkieTheme.textMuted.withValues(alpha: 0.3),
+                          active: widget.isTransmitting,
+                          progress: glowValue,
+                        ),
+                      ),
+                      // 中心文字和图标
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            widget.isTransmitting
+                                ? Icons.mic
+                                : Icons.mic_none,
+                            size: 44,
+                            color: widget.isTransmitting
+                                ? WalkieTheme.accent
+                                : WalkieTheme.textSecondary,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            widget.isTransmitting ? '松手 发送' : '按住说话',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: widget.isTransmitting
+                                  ? WalkieTheme.accent
+                                  : WalkieTheme.textPrimary,
+                              letterSpacing: 2,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              boxShadow: [
-                // 外发光
-                if (widget.isTransmitting)
-                  BoxShadow(
-                    color: WalkieTheme.pttGlow
-                        .withValues(alpha: 0.4 + glowValue * 0.4),
-                    blurRadius: 30 + glowValue * 20,
-                    spreadRadius: 4 + glowValue * 6,
-                  ),
-                // 内阴影
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  widget.isTransmitting ? Icons.mic : Icons.mic_none,
-                  size: 48,
-                  color: widget.isTransmitting
-                      ? Colors.white
-                      : WalkieTheme.textSecondary,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  widget.isTransmitting ? '正在通话' : widget.label,
-                  style: TextStyle(
-                    fontFamily: WalkieTheme.fontMono,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: widget.isTransmitting
-                        ? Colors.white
-                        : WalkieTheme.textPrimary,
-                    letterSpacing: 2,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  widget.isTransmitting ? 'PTT · LIVE' : '按住说话',
-                  style: TextStyle(
-                    fontFamily: WalkieTheme.fontMono,
-                    fontSize: 10,
-                    color: widget.isTransmitting
-                        ? Colors.white.withValues(alpha: 0.7)
-                        : WalkieTheme.textDim,
-                    letterSpacing: 1,
-                  ),
-                ),
-              ],
-            ),
+            ],
           );
         },
       ),
     );
+  }
+}
+
+/// 点阵背景画笔
+class _DotMatrixPainter extends CustomPainter {
+  final Color dotColor;
+  final bool active;
+  final double progress;
+
+  _DotMatrixPainter({
+    required this.dotColor,
+    required this.active,
+    required this.progress,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+    const ringCount = 5;
+    const dotsPerRing = 24;
+
+    for (int ring = 0; ring < ringCount; ring++) {
+      final r = radius * 0.25 + ring * radius * 0.12;
+      final ringAlpha = 1.0 - ring * 0.12;
+      final ringPaint = Paint()
+        ..color = dotColor.withValues(alpha: dotColor.a * ringAlpha)
+        ..style = PaintingStyle.fill;
+
+      for (int i = 0; i < dotsPerRing; i++) {
+        final angle = (i / dotsPerRing) * 2 * math.pi;
+        // 讲话时让点阵旋转
+        final rotation = active ? progress * 2 * math.pi * 0.3 : 0.0;
+        final x = center.dx + r * math.cos(angle + rotation);
+        final y = center.dy + r * math.sin(angle + rotation);
+
+        // 只画在圆内
+        if ((Offset(x, y) - center).distance < radius - 4) {
+          canvas.drawCircle(
+            Offset(x, y),
+            2.0 + (active ? progress * 1.5 : 0),
+            ringPaint,
+          );
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DotMatrixPainter oldDelegate) {
+    return oldDelegate.active != active || oldDelegate.progress != progress;
   }
 }

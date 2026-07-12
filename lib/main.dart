@@ -16,7 +16,7 @@ class JiudhiDuiJiangApp extends StatelessWidget {
     return MaterialApp(
       title: '就是对讲',
       debugShowCheckedModeBanner: false,
-      theme: WalkieTheme.darkTheme,
+      theme: WalkieTheme.themeData,
       home: const _AppLoader(),
     );
   }
@@ -62,7 +62,7 @@ class _AppLoaderState extends State<_AppLoader> {
       return Scaffold(
         backgroundColor: WalkieTheme.background,
         body: Center(
-          child: CircularProgressIndicator(color: WalkieTheme.ledGreen),
+          child: CircularProgressIndicator(color: WalkieTheme.accent),
         ),
       );
     }

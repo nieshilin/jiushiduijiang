@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show ChangeNotifier, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -68,12 +68,21 @@ class WalkieController extends ChangeNotifier {
     _log('正在初始化...');
     notifyListeners();
 
-    // 请求权限
-    await _requestPermissions();
-
     // 设置音频回调
     _audio.onAudioData = _onLocalAudioData;
     await _audio.setVolume(_volume);
+
+    if (kIsWeb) {
+      // Web 端不支持 dart:io 的 UDP 网络功能，仅初始化 UI
+      _localIp = 'Web';
+      _log('Web 预览模式 — 网络功能不可用');
+      _connStatus = ConnectionStatus.connected;
+      notifyListeners();
+      return;
+    }
+
+    // 请求权限
+    await _requestPermissions();
 
     // 启动语音收发
     await _transceiver.start(_localIp);
