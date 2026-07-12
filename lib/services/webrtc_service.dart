@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// WebRTC 音频对讲服务
@@ -25,8 +24,9 @@ class WebRTCService {
   // ── 对端连接 ──
   final Map<String, _WebRTCPeer> _peers = {};
 
-  // ── 缓冲：收到 offer 时对端尚未发现 → 暂存待处理 ──
+  // ── 缓冲：信令先于 mDNS 发现到达 ──
   final Map<String, _PendingOffer> _pendingOffers = {};
+  final Map<String, List<_PendingIce>> _pendingIceCandidates = {};
 
   // ── 信令发送回调（由 voice_transceiver 注入） ──
   void Function(String deviceId, String message)? onSendSignaling;
@@ -34,9 +34,9 @@ class WebRTCService {
   // ── 通话状态回调 ──
   void Function(String deviceId, String deviceName)? onRemoteVoiceStart;
   void Function(String deviceId)? onRemoteVoiceEnd;
-  void Function(String deviceId)? onRemoteAudioActive; // 实际收到音频包
+  void Function(String deviceId)? onRemoteAudioActive;
 
-  // ── WebRTC 媒体连接状态回调（与 UDP 信令区分） ──
+  // ── WebRTC 媒体连接状态回调 ──
   void Function(int connectedCount)? onConnectionCountChanged;
 
   // ── 状态 ──
@@ -46,7 +46,7 @@ class WebRTCService {
   bool get isSending => _localTrackEnabled;
   bool get isInitialized => _initialized;
 
-  /// WebRTC ICE 已建立连接的对端数量（不是 UDP 信令，是媒体通道）
+  /// WebRTC ICE 已建立连接的对端数量
   int get connectedPeerCount =>
       _peers.values.where((p) => p.connected).length;
 
@@ -64,7 +64,6 @@ class WebRTCService {
     }
 
     try {
-      // 1. 获取麦克风流（激活音频会话）
       final Map<String, dynamic> mediaConstraints = {
         'audio': {
           'echoCancellation': true,
@@ -75,38 +74,38 @@ class WebRTCService {
 
       _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
       if (_localStream == null) {
-        _log('❌ getUserMedia 返回 null');
+        _log('getUserMedia returned null');
         return;
       }
 
       final audioTracks = _localStream!.getAudioTracks();
       if (audioTracks.isEmpty) {
-        _log('❌ 无音频轨道');
+        _log('no audio tracks');
         return;
       }
 
       _localAudioTrack = audioTracks.first;
-      _localAudioTrack!.enabled = false; // 初始静音（PTT 未按下）
+      _localAudioTrack!.enabled = false; // PTT 未按下时静音
 
-      // 2. 配置扬声器（音频会话已由 getUserMedia 激活）
+      // 配置扬声器（音频会话已由 getUserMedia 激活）
       await _configureSpeakerphone(true);
 
       _initialized = true;
-      _log('✅ WebRTC 初始化完成 — 麦克风就绪 (trackId=${_localAudioTrack!.id})');
+      _log('WebRTC init ok (trackId=${_localAudioTrack!.id})');
     } catch (e) {
-      _log('❌ WebRTC 初始化失败: $e');
+      _log('WebRTC init failed: $e');
     }
   }
 
-  /// 配置扬声器模式（内部方法，带错误处理）
+  /// 配置扬声器模式
   Future<void> _configureSpeakerphone(bool on) async {
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
       try {
         await Helper.setSpeakerphoneOn(on);
-        _log('🔊 扬声器已${on ? "开启" : "关闭"}');
+        _log('speakerphone ${on ? "on" : "off"}');
       } catch (e) {
-        _log('⚠️ 扬声器设置失败 (可能缺权限): $e');
+        _log('speakerphone failed: $e');
       }
     }
   }
@@ -114,38 +113,44 @@ class WebRTCService {
   // ── 设备生命周期管理 ──
 
   /// 设备上线 → 建立 PeerConnection
-  /// 返回 true 表示新建了连接
   Future<bool> onDeviceOnline(String deviceId, String deviceName) async {
     if (!_initialized || kIsWeb) return false;
     if (_peers.containsKey(deviceId)) return false;
 
-    _log('🔗 建立连接: $deviceName ($deviceId)');
+    _log('connect: $deviceName ($deviceId)');
     final peer = _WebRTCPeer(deviceId: deviceId, deviceName: deviceName);
     _peers[deviceId] = peer;
 
     try {
       await _setupPeerConnection(deviceId, peer);
 
-      // 确定角色并发起协商
+      // 确定角色
       peer.isPolite = _localDeviceId.compareTo(deviceId) > 0;
 
-      // ★ 检查是否有缓冲的 offer（信令先于发现到达）
+      // ★ 处理缓冲的 ICE 候选（信令先于发现到达）
+      final pendingIce = _pendingIceCandidates.remove(deviceId);
+      if (pendingIce != null && pendingIce.isNotEmpty) {
+        _log('process ${pendingIce.length} buffered ICE candidates: $deviceId');
+        for (final pic in pendingIce) {
+          await _addIceCandidateSafe(deviceId, peer, pic.candidate, pic.sdpMid, pic.sdpMLineIndex);
+        }
+      }
+
+      // ★ 检查是否有缓冲的 offer
       final pending = _pendingOffers.remove(deviceId);
       if (pending != null) {
-        _log('📨 处理缓冲 offer: $deviceId (信令先于发现到达)');
+        _log('process buffered offer: $deviceId');
         await onSdpReceived(deviceId, pending.sdp, true);
-        return true; // 不再主动发 offer（对方的 offer 已处理）
+        return true;
       }
 
       if (!peer.isPolite) {
-        // Impolite peer 主动发起 offer
         await _createAndSendOffer(deviceId);
       }
-      // Polite peer 等待对端发 offer
 
       return true;
     } catch (e) {
-      _log('❌ 建立连接失败 [$deviceName]: $e');
+      _log('connect failed [$deviceName]: $e');
       _peers.remove(deviceId);
       _notifyConnectionCount();
       return false;
@@ -155,62 +160,76 @@ class WebRTCService {
   /// 设备下线 → 关闭连接
   void onDeviceOffline(String deviceId) {
     final peer = _peers.remove(deviceId);
-    _pendingOffers.remove(deviceId); // 清理缓冲
+    _pendingOffers.remove(deviceId);
+    _pendingIceCandidates.remove(deviceId);
     if (peer != null) {
-      _log('🔌 断开连接: ${peer.deviceName}');
+      _log('disconnect: ${peer.deviceName}');
       peer.pc?.close();
       peer.pc = null;
       _notifyConnectionCount();
     }
   }
 
-  /// 同步设备列表：移除已下线的对端，新建新上线的对端
+  /// 同步设备列表：移除已下线的对端
   void syncFromDeviceList(List<String> onlineDeviceIds) {
-    // 清理僵尸连接
     final stale = _peers.keys.where((id) => !onlineDeviceIds.contains(id)).toList();
     for (final id in stale) {
-      _log('🧹 清理僵尸连接: $id (设备已离线)');
+      _log('cleanup stale: $id');
       onDeviceOffline(id);
     }
-    // 清理僵尸缓冲
     final stalePending = _pendingOffers.keys
         .where((id) => !onlineDeviceIds.contains(id))
         .toList();
     for (final id in stalePending) {
       _pendingOffers.remove(id);
     }
+    final staleIce = _pendingIceCandidates.keys
+        .where((id) => !onlineDeviceIds.contains(id))
+        .toList();
+    for (final id in staleIce) {
+      _pendingIceCandidates.remove(id);
+    }
   }
 
-  /// 创建一个 PeerConnection 并配置回调
+  /// 创建 PeerConnection 并配置回调
   Future<void> _setupPeerConnection(String deviceId, _WebRTCPeer peer) async {
-    // 创建 PeerConnection（纯 LAN，无 ICE 服务器）
     peer.pc = await createPeerConnection({
       'iceServers': [],
       'iceTransportPolicy': 'all',
       'sdpSemantics': 'unified-plan',
     });
 
-    _log('  📶 PeerConnection 已创建: $deviceId');
+    _log('  PeerConnection created: $deviceId');
 
-    // 添加本地音频轨道（unified plan 下自动创建 transceiver）
+    // 添加本地音频轨道
     if (_localStream != null) {
       for (final track in _localStream!.getTracks()) {
         peer.pc!.addTrack(track, _localStream!);
       }
-      _log('  📤 已添加本地音频轨道 (${_localStream!.getAudioTracks().length} 条)');
+      _log('  local audio track added');
     }
 
-    // ★ 远程音频轨道回调 — unified plan 必须用 onTrack
+    // ★ onTrack — unified plan 远程音频轨道到达
     peer.pc!.onTrack = (RTCTrackEvent event) {
-      _log('📻 收到远程音频轨道: ${peer.deviceName}, kind=${event.track.kind}, id=${event.track.id}');
+      _log('  onTrack: kind=${event.track.kind}, id=${event.track.id}, streams=${event.streams.length}');
+
       if (event.track.kind == 'audio') {
+        // ★ 显式启用远程音频轨道
+        event.track.enabled = true;
         peer.remoteAudioTrack = event.track;
+
+        // ★ 保存远程流引用（防止 GC 回收导致音频停止）
+        if (event.streams.isNotEmpty) {
+          peer.remoteStream = event.streams.first;
+          _log('  remote stream saved (${event.streams.length} streams)');
+        }
+
         peer.streamReady = true;
         onRemoteAudioActive?.call(deviceId);
-        _log('📻 远程音频轨道已就绪, 应由 WebRTC 引擎自动播放');
+        _log('  remote audio track ready + enabled');
 
         event.track.onEnded = () {
-          _log('🔇 远程音频轨道结束: ${peer.deviceName}');
+          _log('  remote track ended: ${peer.deviceName}');
         };
       }
     };
@@ -218,56 +237,53 @@ class WebRTCService {
     // ICE 候选 → 信令发送
     peer.pc!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
-        _log('  🧊 ICE 候选: ${peer.deviceName} type=${candidate.candidate!.split(' ').first}');
+        _log('  ICE candidate: ${peer.deviceName} ${candidate.candidate!.split(' ').first}');
         _sendIceCandidate(deviceId, candidate);
       }
     };
 
-    // 连接状态变化
+    // 连接状态
     peer.pc!.onConnectionState = (RTCPeerConnectionState state) {
-      _log('📡 连接状态 [${peer.deviceName}]: $state');
+      _log('  conn state [${peer.deviceName}]: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _log('✅ WebRTC 媒体连接已建立: ${peer.deviceName}');
+        _log('  WebRTC connected: ${peer.deviceName}');
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _log('❌ 连接断开: ${peer.deviceName} ($state)');
+        _log('  conn lost: ${peer.deviceName} ($state)');
         final wasConnected = peer.connected;
         peer.connected = false;
         if (wasConnected) _notifyConnectionCount();
       }
     };
 
-    // ★ ICE 连接状态 — 关键：这是媒体通道真正建立的信号
+    // ★ ICE 连接状态 — 媒体通道真正建立的信号
     peer.pc!.onIceConnectionState = (RTCIceConnectionState state) {
-      _log('🧊 ICE 状态 [${peer.deviceName}]: $state');
+      _log('  ICE state [${peer.deviceName}]: $state');
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-        _log('✅ ICE 已连接 — 媒体通道就绪: ${peer.deviceName}');
+        _log('  ICE connected: ${peer.deviceName}');
         peer.connected = true;
-        // ★ 连接建立后重设扬声器（确保音频路由正确）
         _configureSpeakerphone(true);
         _notifyConnectionCount();
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-        _log('❌ ICE 连接失败: ${peer.deviceName} (WebRTC 音频将无法到达)');
+        _log('  ICE FAILED: ${peer.deviceName}');
         peer.connected = false;
         _notifyConnectionCount();
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-        _log('⚠️ ICE 断开: ${peer.deviceName}');
+        _log('  ICE disconnected: ${peer.deviceName}');
         peer.connected = false;
         _notifyConnectionCount();
       }
     };
 
-    // ICE 收集完成
     peer.pc!.onIceGatheringState = (RTCIceGatheringState state) {
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-        _log('  🧊 ICE 收集完成: ${peer.deviceName}');
+        _log('  ICE gathering complete: ${peer.deviceName}');
       }
     };
 
-    // 信令状态
     peer.pc!.onSignalingState = (RTCSignalingState state) {
-      _log('  📝 信令状态 [${peer.deviceName}]: $state');
+      _log('  signaling [${peer.deviceName}]: $state');
     };
   }
 
@@ -277,23 +293,20 @@ class WebRTCService {
 
   // ── PTT 控制 ──
 
-  /// PTT 按下 → 开始发送音频
   void startSending() {
     if (!_initialized || _localTrackEnabled) return;
     _localTrackEnabled = true;
     _localAudioTrack?.enabled = true;
-    _log('🎤 PTT 按下 — 开始发送音频 (track enabled: ${_localAudioTrack?.enabled})');
+    _log('PTT down (track enabled=${_localAudioTrack?.enabled})');
   }
 
-  /// PTT 松开 → 停止发送音频
   void stopSending() {
     if (!_localTrackEnabled) return;
     _localTrackEnabled = false;
     _localAudioTrack?.enabled = false;
-    _log('🔇 PTT 松开 — 停止发送音频');
+    _log('PTT up (track enabled=false)');
   }
 
-  /// 当前在线对端数量
   int get peerCount => _peers.length;
 
   // ── 信令处理 ──
@@ -302,15 +315,15 @@ class WebRTCService {
   Future<void> onSdpReceived(String deviceId, String sdp, bool isOffer) async {
     var peer = _peers[deviceId];
 
-    // ★ 收到 offer 但对端尚未发现 → 缓冲等待
+    // ★ 收到 offer 但对端尚未发现 → 缓冲
     if (peer == null && isOffer) {
-      _log('📨 缓冲 offer: $deviceId (对端尚未发现，等待 mDNS...)');
+      _log('buffer offer: $deviceId (not discovered yet)');
       _pendingOffers[deviceId] = _PendingOffer(sdp: sdp, timestamp: DateTime.now());
       return;
     }
 
     if (peer == null || peer.pc == null) {
-      _log('⚠️ 收到未连接设备的 SDP: $deviceId (isOffer=$isOffer)');
+      _log('SDP from unknown device: $deviceId (isOffer=$isOffer)');
       return;
     }
 
@@ -321,13 +334,14 @@ class WebRTCService {
       );
 
       if (isOffer) {
-        _log('📥 收到 SDP offer: ${peer.deviceName} (${sdp.length} bytes)');
+        _log('SDP offer recv: ${peer.deviceName} (${sdp.length} bytes)');
+
         if (peer.makingOffer) {
           if (peer.isPolite) {
-            _log('🔄 协商冲突，polite 方回滚');
+            _log('glare, polite rollback');
             await _rollbackAndAccept(deviceId, description);
           } else {
-            _log('🔄 协商冲突，impolite 方忽略');
+            _log('glare, impolite ignore');
           }
           return;
         }
@@ -335,20 +349,30 @@ class WebRTCService {
         peer.settingRemote = true;
         await peer.pc!.setRemoteDescription(description);
         peer.settingRemote = false;
+        peer.remoteDescriptionSet = true;
+
+        // ★ 处理缓冲的 ICE 候选（在 setRemoteDescription 之前到达的）
+        await _flushPendingCandidates(deviceId, peer);
 
         final answer = await peer.pc!.createAnswer();
         await peer.pc!.setLocalDescription(answer);
         _sendSdp(deviceId, answer.sdp!, false);
-        _log('📤 发送 SDP answer: ${peer.deviceName}');
+        _log('SDP answer sent: ${peer.deviceName}');
       } else {
-        _log('📥 收到 SDP answer: ${peer.deviceName}');
+        _log('SDP answer recv: ${peer.deviceName}');
         peer.settingRemote = true;
         await peer.pc!.setRemoteDescription(description);
         peer.settingRemote = false;
-        _log('✅ SDP 协商完成: ${peer.deviceName}');
+        peer.remoteDescriptionSet = true;
+
+        // ★ 处理缓冲的 ICE 候选
+        await _flushPendingCandidates(deviceId, peer);
+
+        _log('SDP negotiation done: ${peer.deviceName}');
       }
     } catch (e) {
-      _log('❌ SDP 处理失败 [$deviceId]: $e');
+      _log('SDP failed [$deviceId]: $e');
+      peer.settingRemote = false;
     }
   }
 
@@ -360,7 +384,34 @@ class WebRTCService {
     int sdpMLineIndex,
   ) async {
     final peer = _peers[deviceId];
+
+    // ★ 对端尚未发现 → 缓冲 ICE 候选
     if (peer == null || peer.pc == null) {
+      _log('buffer ICE: $deviceId (not discovered yet)');
+      _pendingIceCandidates.putIfAbsent(deviceId, () => []);
+      _pendingIceCandidates[deviceId]!.add(
+        _PendingIce(candidate: candidate, sdpMid: sdpMid, sdpMLineIndex: sdpMLineIndex),
+      );
+      return;
+    }
+
+    await _addIceCandidateSafe(deviceId, peer, candidate, sdpMid, sdpMLineIndex);
+  }
+
+  /// 安全添加 ICE 候选（处理 remoteDescription 尚未设置的情况）
+  Future<void> _addIceCandidateSafe(
+    String deviceId,
+    _WebRTCPeer peer,
+    String candidate,
+    String sdpMid,
+    int sdpMLineIndex,
+  ) async {
+    // ★ 如果 remoteDescription 尚未设置，缓冲到 peer 内部
+    if (!peer.remoteDescriptionSet) {
+      _log('buffer ICE (no remote desc yet): ${peer.deviceName}');
+      peer.pendingCandidates.add(
+        _PendingIce(candidate: candidate, sdpMid: sdpMid, sdpMLineIndex: sdpMLineIndex),
+      );
       return;
     }
 
@@ -368,9 +419,29 @@ class WebRTCService {
       await peer.pc!.addCandidate(
         RTCIceCandidate(candidate, sdpMid, sdpMLineIndex),
       );
-      _log('  🧊 ICE 候选已添加: ${peer.deviceName} type=${candidate.split(' ').first}');
+      _log('  ICE added: ${peer.deviceName} ${candidate.split(' ').first}');
     } catch (e) {
-      _log('❌ ICE candidate 添加失败 [$deviceId]: $e');
+      _log('  ICE add failed [$deviceId]: $e');
+    }
+  }
+
+  /// 刷新 peer 内部缓冲的 ICE 候选（在 setRemoteDescription 之后调用）
+  Future<void> _flushPendingCandidates(String deviceId, _WebRTCPeer peer) async {
+    if (peer.pendingCandidates.isEmpty) return;
+
+    _log('flush ${peer.pendingCandidates.length} pending ICE: ${peer.deviceName}');
+    final candidates = List<_PendingIce>.from(peer.pendingCandidates);
+    peer.pendingCandidates.clear();
+
+    for (final pic in candidates) {
+      try {
+        await peer.pc!.addCandidate(
+          RTCIceCandidate(pic.candidate, pic.sdpMid, pic.sdpMLineIndex),
+        );
+        _log('  flushed ICE: ${peer.deviceName} ${pic.candidate.split(' ').first}');
+      } catch (e) {
+        _log('  flush ICE failed: $e');
+      }
     }
   }
 
@@ -381,7 +452,6 @@ class WebRTCService {
 
   // ── 内部方法 ──
 
-  /// 创建并发送 SDP offer
   Future<void> _createAndSendOffer(String deviceId) async {
     final peer = _peers[deviceId];
     if (peer == null || peer.pc == null) return;
@@ -392,15 +462,15 @@ class WebRTCService {
       await peer.pc!.setLocalDescription(offer);
       peer.makingOffer = false;
 
-      _log('📤 发送 SDP offer: ${peer.deviceName} (${offer.sdp!.length} bytes)');
+      _log('SDP offer sent: ${peer.deviceName} (${offer.sdp!.length} bytes)');
       _sendSdp(deviceId, offer.sdp!, true);
     } catch (e) {
       peer.makingOffer = false;
-      _log('❌ 创建 offer 失败 [$deviceId]: $e');
+      _log('create offer failed [$deviceId]: $e');
     }
   }
 
-  /// Polite peer 回滚自己的 offer，接受对方的
+  /// Polite peer 回滚并接受对方的 offer
   Future<void> _rollbackAndAccept(
     String deviceId,
     RTCSessionDescription remoteOffer,
@@ -417,23 +487,26 @@ class WebRTCService {
       peer.settingRemote = true;
       await peer.pc!.setRemoteDescription(remoteOffer);
       peer.settingRemote = false;
+      peer.remoteDescriptionSet = true;
+
+      // ★ 刷新缓冲的 ICE 候选
+      await _flushPendingCandidates(deviceId, peer);
 
       final answer = await peer.pc!.createAnswer();
       await peer.pc!.setLocalDescription(answer);
       _sendSdp(deviceId, answer.sdp!, false);
     } catch (e) {
-      _log('❌ 回滚协商失败 [$deviceId]: $e');
+      _log('rollback failed [$deviceId]: $e');
+      peer.settingRemote = false;
     }
   }
 
-  /// 发送 SDP 到对端
   void _sendSdp(String deviceId, String sdp, bool isOffer) {
     final type = isOffer ? 'offer' : 'answer';
     final encoded = base64.encode(utf8.encode(sdp));
     onSendSignaling?.call(deviceId, 'JDHI_WTC:$deviceId:$type:$encoded');
   }
 
-  /// 发送 ICE candidate 到对端
   void _sendIceCandidate(String deviceId, RTCIceCandidate candidate) {
     final cand = base64.encode(utf8.encode(candidate.candidate ?? ''));
     final mid = base64.encode(utf8.encode(candidate.sdpMid ?? ''));
@@ -452,6 +525,7 @@ class WebRTCService {
     }
     _peers.clear();
     _pendingOffers.clear();
+    _pendingIceCandidates.clear();
 
     _localAudioTrack?.stop();
     _localAudioTrack = null;
@@ -466,11 +540,23 @@ class WebRTCService {
   }
 }
 
-/// 缓冲的 SDP offer（信令先于 mDNS 发现到达）
+/// 缓冲的 SDP offer
 class _PendingOffer {
   final String sdp;
   final DateTime timestamp;
   _PendingOffer({required this.sdp, required this.timestamp});
+}
+
+/// 缓冲的 ICE candidate
+class _PendingIce {
+  final String candidate;
+  final String sdpMid;
+  final int sdpMLineIndex;
+  _PendingIce({
+    required this.candidate,
+    required this.sdpMid,
+    required this.sdpMLineIndex,
+  });
 }
 
 /// 单个对端的 WebRTC 连接状态
@@ -483,6 +569,12 @@ class _WebRTCPeer {
   MediaStreamTrack? remoteAudioTrack;
   bool streamReady = false;
   bool connected = false;
+
+  // ★ remoteDescription 是否已设置（用于 ICE 候选缓冲判断）
+  bool remoteDescriptionSet = false;
+
+  // ★ peer 内部缓冲的 ICE 候选（remoteDescription 设置前到达的）
+  final List<_PendingIce> pendingCandidates = [];
 
   // Perfect negotiation 状态
   bool isPolite = false;
