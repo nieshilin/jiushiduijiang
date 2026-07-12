@@ -1,0 +1,27 @@
+name: jiudhiduijiang
+description: "就是对讲 - 局域网跨平台对讲机应用"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.8.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  record: ^5.1.2
+  audioplayers: ^6.1.0
+  permission_handler: ^11.3.1
+  network_info_plus: ^5.0.3
+  wakelock_plus: ^1.2.8
+  shared_preferences: ^2.3.2
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
