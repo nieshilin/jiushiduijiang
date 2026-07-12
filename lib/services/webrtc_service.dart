@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// WebRTC 音频对讲服务
@@ -30,7 +31,7 @@ class WebRTCService {
   // ── 通话状态回调 ──
   void Function(String deviceId, String deviceName)? onRemoteVoiceStart;
   void Function(String deviceId)? onRemoteVoiceEnd;
-  void Function(String deviceId)? onRemoteAudioActive;  // 实际收到音频包
+  void Function(String deviceId)? onRemoteAudioActive; // 实际收到音频包
 
   // ── 状态 ──
   bool _initialized = false;
@@ -39,7 +40,7 @@ class WebRTCService {
   bool get isSending => _localTrackEnabled;
   bool get isInitialized => _initialized;
 
-  /// 初始化：获取麦克风流
+  /// 初始化：获取麦克风流 + 配置扬声器
   Future<void> init({
     required String deviceId,
     required String deviceName,
@@ -53,6 +54,7 @@ class WebRTCService {
     }
 
     try {
+      // 1. 获取麦克风流（激活音频会话）
       final Map<String, dynamic> mediaConstraints = {
         'audio': {
           'echoCancellation': true,
@@ -72,6 +74,13 @@ class WebRTCService {
       if (audioTracks.isEmpty) {
         _log('❌ 无音频轨道');
         return;
+      }
+
+      // 2. 配置扬声器（音频会话已激活，确保 iOS 可用）
+      if (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        await Helper.setSpeakerphoneOn(true);
+        _log('🔊 扬声器已开启');
       }
 
       _localAudioTrack = audioTracks.first;
@@ -99,22 +108,24 @@ class WebRTCService {
         'iceTransportPolicy': 'all',
       });
 
-      // 添加本地音频轨道
+      // 添加本地音频轨道（unified plan 下自动创建 transceiver）
       if (_localStream != null) {
         for (final track in _localStream!.getTracks()) {
           peer.pc!.addTrack(track, _localStream!);
         }
+        _log('📤 已添加本地音频轨道 (${_localStream!.getAudioTracks().length} 条)');
       }
 
-      // 远程音频流回调 — flutter_webrtc 自动播放到扬声器
-      peer.pc!.onAddStream = (MediaStream stream) {
-        _log('📻 收到远程音频流: ${peer.deviceName}');
-        peer.remoteStream = stream;
-        peer.streamReady = true;
+      // ★ 远程音频轨道回调 — 使用 onTrack 替代已废弃的 onAddStream
+      peer.pc!.onTrack = (RTCTrackEvent event) {
+        _log('📻 收到远程音频轨道: ${peer.deviceName}, kind=${event.track.kind}');
+        if (event.track.kind == 'audio') {
+          peer.remoteAudioTrack = event.track;
+          peer.streamReady = true;
+          onRemoteAudioActive?.call(deviceId);
 
-        // 监听音频轨道状态
-        for (final track in stream.getAudioTracks()) {
-          track.onEnded = () {
+          // 监听轨道结束
+          event.track.onEnded = () {
             _log('🔇 远程音频轨道结束: ${peer.deviceName}');
           };
         }
@@ -213,8 +224,6 @@ class WebRTCService {
         // 收到 offer
         if (peer.makingOffer) {
           // 冲突：双方同时发了 offer
-          // Polite peer 回滚自己的 offer，接受对方的
-          // Impolite peer 忽略对方的 offer
           if (peer.isPolite) {
             _log('🔄 协商冲突，polite 方回滚');
             await _rollbackAndAccept(deviceId, description);
@@ -359,6 +368,7 @@ class _WebRTCPeer {
 
   RTCPeerConnection? pc;
   MediaStream? remoteStream;
+  MediaStreamTrack? remoteAudioTrack;
   bool streamReady = false;
   bool connected = false;
 
