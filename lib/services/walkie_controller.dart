@@ -243,6 +243,8 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   /// 请求系统权限
   Future<void> _requestPermissions() async {
+    if (kIsWeb) return;
+
     if (defaultTargetPlatform == TargetPlatform.android) {
       final results = await [
         Permission.microphone,
@@ -250,31 +252,47 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
         Permission.phone,
       ].request();
 
-      // 检查麦克风权限是否被拒绝
       final micStatus = results[Permission.microphone];
-      if (micStatus != null && !micStatus.isGranted) {
-        _micPermissionDenied = true;
-        _log('麦克风权限被拒绝');
-        notifyListeners();
-        return;
-      }
-    } else if (defaultTargetPlatform == TargetPlatform.iOS) {
-      // iOS: 先检查当前状态（用户可能已在设置中授权）
-      final currentStatus = await Permission.microphone.status;
-      if (currentStatus.isGranted) {
-        _micPermissionDenied = false;
-        return;
-      }
-      // 未授权，尝试请求
-      final micStatus = await Permission.microphone.request();
-      if (!micStatus.isGranted) {
-        _micPermissionDenied = true;
-        _log('麦克风权限被拒绝');
-        notifyListeners();
-        return;
-      }
+      _setMicPermissionDenied(!(micStatus?.isGranted ?? false));
+      return;
     }
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      // iOS: 先查当前状态，避免已授权用户误触发请求
+      final currentStatus = await Permission.microphone.status;
+      _log('麦克风权限状态: $currentStatus');
+
+      if (currentStatus.isGranted) {
+        _setMicPermissionDenied(false);
+        return;
+      }
+
+      if (currentStatus.isRestricted || currentStatus.isPermanentlyDenied) {
+        // 受限或永久拒绝：直接标记为拒绝，不再弹系统弹窗
+        _setMicPermissionDenied(true);
+        return;
+      }
+
+      // 尚未请求，尝试弹系统授权弹窗
+      final requestedStatus = await Permission.microphone.request();
+      _log('麦克风请求结果: $requestedStatus');
+      _setMicPermissionDenied(!requestedStatus.isGranted);
+      return;
+    }
+
     // Windows 不需要显式权限请求
+  }
+
+  /// 统一设置麦克风权限拒绝标志，仅在变化时通知 UI
+  void _setMicPermissionDenied(bool denied) {
+    if (_micPermissionDenied == denied) return;
+    _micPermissionDenied = denied;
+    if (denied) {
+      _log('麦克风权限被拒绝');
+    } else {
+      _log('麦克风权限已授予');
+    }
+    notifyListeners();
   }
 
   /// App 生命周期变化 — 从设置页返回时重新检查权限
@@ -287,14 +305,12 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   /// 重新检查麦克风权限（从设置页返回后调用）
   Future<void> _recheckMicPermission() async {
-    if (!_micPermissionDenied) return;
-
     final status = await Permission.microphone.status;
-    if (status.isGranted) {
-      _micPermissionDenied = false;
-      _log('麦克风权限已授予');
-      notifyListeners();
-    } else {
+    _log('App 恢复前台，麦克风权限状态: $status');
+
+    _setMicPermissionDenied(!status.isGranted);
+
+    if (_micPermissionDenied) {
       // 权限仍被拒绝，通知 UI 重新引导用户
       onPermissionRecheck?.call();
     }
