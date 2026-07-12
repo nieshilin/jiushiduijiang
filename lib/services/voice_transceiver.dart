@@ -43,17 +43,46 @@ class VoiceTransceiver {
   /// 处理接收到的 UDP 数据报
   void _handleDatagram(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
-    final datagram = _socket?.receive();
-    if (datagram == null) return;
 
-    final data = datagram.data;
-    final senderIp = datagram.address.address;
+    // 循环读取所有可用数据报，防止丢包
+    while (true) {
+      final datagram = _socket?.receive();
+      if (datagram == null) break;
 
-    // 检查是否为文本控制消息
-    if (data.length < 8) return;
+      try {
+        _processDatagram(datagram.data, datagram.address.address);
+      } catch (e) {
+        // 忽略解析错误的包
+      }
+    }
+  }
 
-    // 尝试解析为文本消息
-    final asString = utf8.decode(data);
+  /// 解析单个数据报
+  void _processDatagram(Uint8List data, String senderIp) {
+    if (data.length < 4) return;
+
+    // ⚠️ 必须先检查二进制语音数据包，再尝试 UTF-8 解码
+    // 二进制 PCM 数据不是合法 UTF-8，直接 utf8.decode 会抛异常导致语音数据丢失
+    if (data.length >= 8) {
+      // 检查 magic "JDVD" (little-endian: 0x4A, 0x44, 0x56, 0x44)
+      if (data[0] == 0x4A && data[1] == 0x44 &&
+          data[2] == 0x56 && data[3] == 0x44) {
+        final pcmData = data.sublist(8);
+        if (pcmData.isNotEmpty) {
+          onAudioData?.call(senderIp, pcmData);
+        }
+        return;
+      }
+    }
+
+    // 非二进制包，尝试解析为文本控制消息
+    String asString;
+    try {
+      asString = utf8.decode(data, allowMalformed: true);
+    } catch (_) {
+      return;
+    }
+
     if (asString.startsWith(AppConstants.prefixVoiceStart)) {
       // 通话开始信号: JDHI_VS:senderId:senderName
       final parts = asString.split(':');
@@ -66,18 +95,6 @@ class VoiceTransceiver {
       // 通话结束信号: JDHI_VE:senderId
       onVoiceEnd?.call(senderIp);
       return;
-    }
-
-    // 二进制语音数据: [4字节magic][4字节seq][PCM数据]
-    if (data.length >= 8) {
-      final magic = data.buffer.asByteData().getUint32(0, Endian.little);
-      if (magic == 0x4456444A) {
-        // "JDVD" in little-endian
-        final pcmData = data.sublist(8);
-        if (pcmData.isNotEmpty) {
-          onAudioData?.call(senderIp, pcmData);
-        }
-      }
     }
   }
 

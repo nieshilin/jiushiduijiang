@@ -47,24 +47,24 @@ class AudioService {
     });
   }
 
-  /// 配置播放器音频上下文 — 强制走扬声器、通话音量
+  /// 配置播放器音频上下文 — 强制走扬声器输出
   Future<void> _configureAudioContext() async {
     try {
       await _player.setAudioContext(
         AudioContext(
           android: const AudioContextAndroid(
+            // 用 normal 模式走扬声器，inCommunication 会路由到听筒
             isSpeakerphoneOn: true,
-            audioMode: AndroidAudioMode.inCommunication,
+            audioMode: AndroidAudioMode.normal,
             audioFocus: AndroidAudioFocus.gain,
             contentType: AndroidContentType.speech,
-            usageType: AndroidUsageType.voiceCommunication,
+            usageType: AndroidUsageType.media,
             stayAwake: true,
           ),
           iOS: AudioContextIOS(
-            category: AVAudioSessionCategory.playAndRecord,
+            category: AVAudioSessionCategory.playback,
             options: const {
               AVAudioSessionOptions.defaultToSpeaker,
-              AVAudioSessionOptions.allowBluetooth,
             },
           ),
         ),
@@ -131,15 +131,14 @@ class AudioService {
     buffer.addAll(pcmData);
     _pcmBuffers[senderIp] = buffer;
 
-    // 第一次收到数据立即触发播放，缩短对讲延迟
+    // 用定时器统一刷新，不在每次收到数据时都触发
     if (_playbackFlushTimer == null) {
+      // 首次收到数据，立即播放一次（缩短延迟）
       _flushPlaybackBuffer(force: true);
       _playbackFlushTimer = Timer.periodic(
-        const Duration(milliseconds: 80),
+        const Duration(milliseconds: 100),
         (_) => _flushPlaybackBuffer(),
       );
-    } else {
-      _flushPlaybackBuffer();
     }
   }
 
@@ -149,8 +148,8 @@ class AudioService {
       final buffer = entry.value;
       if (buffer.isEmpty) continue;
 
-      // 强制模式：有数据就播；普通模式：积累到 50ms 再播，减少卡顿
-      final minBytes = force ? 1 : 1600; // 50ms @ 16kHz 16bit mono
+      // 强制模式：有数据就播；普通模式：积累到 200ms 再播，减少碎片
+      final minBytes = force ? 1 : 6400; // 200ms @ 16kHz 16bit mono
       if (buffer.length < minBytes) continue;
 
       final pcmBytes = Uint8List.fromList(buffer);
@@ -178,6 +177,7 @@ class AudioService {
     try {
       await _player.setVolume(_isMuted ? 0 : _volume);
       await _player.play(BytesSource(wavBytes));
+      _log('播放音频块: ${wavBytes.length} 字节, 队列剩余 ${_playbackQueue.length}');
     } catch (e) {
       _isPlaying = false;
       _log('播放失败: $e');
