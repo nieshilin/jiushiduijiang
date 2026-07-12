@@ -53,7 +53,7 @@ class VoiceTransceiver {
     if (data.length < 8) return;
 
     // 尝试解析为文本消息
-    final asString = String.fromCharCodes(data);
+    final asString = utf8.decode(data);
     if (asString.startsWith(AppConstants.prefixVoiceStart)) {
       // 通话开始信号: JDHI_VS:senderId:senderName
       final parts = asString.split(':');

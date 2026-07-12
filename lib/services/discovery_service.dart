@@ -81,7 +81,7 @@ class DiscoveryService {
       // 过滤本机消息
       if (datagram.address.address == _localIp) return;
 
-      final message = String.fromCharCodes(datagram.data);
+      final message = utf8.decode(datagram.data);
       _parseMessage(message, datagram.address);
     }
   }

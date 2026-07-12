@@ -10,7 +10,7 @@ import 'package:jiudhiduijiang/utils/wav_utils.dart';
 /// 音频录制与播放服务
 class AudioService {
   final AudioRecorder _recorder = AudioRecorder();
-  final AudioPlayer _player = AudioPlayer();
+  late final AudioPlayer _player;
 
   StreamSubscription? _recordSub;
   bool _isRecording = false;
@@ -32,11 +32,47 @@ class AudioService {
   double get volume => _volume;
 
   AudioService() {
+    _player = AudioPlayer();
+    _configureAudioContext();
     _player.setReleaseMode(ReleaseMode.stop);
     _player.onPlayerComplete.listen((_) {
       _isPlaying = false;
       _tryPlayNext();
     });
+    _player.onPlayerStateChanged.listen((state) {
+      if (state == PlayerState.completed) {
+        _isPlaying = false;
+        _tryPlayNext();
+      }
+    });
+  }
+
+  /// 配置播放器音频上下文 — 强制走扬声器、通话音量
+  Future<void> _configureAudioContext() async {
+    try {
+      await _player.setAudioContext(
+        AudioContext(
+          android: const AudioContextAndroid(
+            isSpeakerphoneOn: true,
+            audioMode: AndroidAudioMode.inCommunication,
+            audioFocus: AndroidAudioFocus.gain,
+            contentType: AndroidContentType.speech,
+            usageType: AndroidUsageType.voiceCommunication,
+            stayAwake: true,
+          ),
+          iOS: AudioContextIOS(
+            category: AVAudioSessionCategory.playAndRecord,
+            options: const {
+              AVAudioSessionOptions.defaultToSpeaker,
+              AVAudioSessionOptions.allowBluetooth,
+            },
+          ),
+        ),
+      );
+      await _player.setVolume(_isMuted ? 0 : _volume);
+    } catch (e) {
+      _log('音频上下文配置失败: $e');
+    }
   }
 
   /// 请求麦克风权限
@@ -69,6 +105,8 @@ class AudioService {
         if (!_isMuted && onAudioData != null) {
           onAudioData!(data);
         }
+      }, onError: (e) {
+        _log('录音错误: $e');
       });
     } catch (e) {
       _isRecording = false;
@@ -93,24 +131,31 @@ class AudioService {
     buffer.addAll(pcmData);
     _pcmBuffers[senderIp] = buffer;
 
-    // 每 300ms 刷新一次播放队列
-    _playbackFlushTimer ??= Timer.periodic(
-      const Duration(milliseconds: 300),
-      (_) => _flushPlaybackBuffer(),
-    );
+    // 第一次收到数据立即触发播放，缩短对讲延迟
+    if (_playbackFlushTimer == null) {
+      _flushPlaybackBuffer(force: true);
+      _playbackFlushTimer = Timer.periodic(
+        const Duration(milliseconds: 80),
+        (_) => _flushPlaybackBuffer(),
+      );
+    } else {
+      _flushPlaybackBuffer();
+    }
   }
 
   /// 将缓冲的 PCM 数据转为 WAV 并加入播放队列
-  void _flushPlaybackBuffer() {
+  void _flushPlaybackBuffer({bool force = false}) {
     for (final entry in _pcmBuffers.entries) {
       final buffer = entry.value;
-      if (buffer.length < 3200) continue; // 至少 100ms 数据才播放
+      if (buffer.isEmpty) continue;
 
-      // 取出全部缓冲数据
+      // 强制模式：有数据就播；普通模式：积累到 50ms 再播，减少卡顿
+      final minBytes = force ? 1 : 1600; // 50ms @ 16kHz 16bit mono
+      if (buffer.length < minBytes) continue;
+
       final pcmBytes = Uint8List.fromList(buffer);
       buffer.clear();
 
-      // 包装为 WAV 并加入播放队列
       final wavBytes = WavUtils.buildWav(pcmBytes);
       _playbackQueue.add(wavBytes);
     }
@@ -126,12 +171,18 @@ class AudioService {
   }
 
   /// 尝试播放队列中的下一段音频
-  void _tryPlayNext() {
+  Future<void> _tryPlayNext() async {
     if (_isPlaying || _playbackQueue.isEmpty) return;
     _isPlaying = true;
     final wavBytes = _playbackQueue.removeAt(0);
-    _player.setVolume(_isMuted ? 0 : _volume);
-    _player.play(BytesSource(wavBytes));
+    try {
+      await _player.setVolume(_isMuted ? 0 : _volume);
+      await _player.play(BytesSource(wavBytes));
+    } catch (e) {
+      _isPlaying = false;
+      _log('播放失败: $e');
+      _tryPlayNext();
+    }
   }
 
   /// 通话开始 — 准备接收
@@ -180,5 +231,11 @@ class AudioService {
     await stopPlayback();
     _recorder.dispose();
     _player.dispose();
+  }
+
+  void _log(String msg) {
+    // 调试日志，release 模式可移除
+    // ignore: avoid_print
+    print('[AudioService] $msg');
   }
 }
