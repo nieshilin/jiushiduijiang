@@ -340,7 +340,14 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     _transceiver.sendVoiceStart(_deviceId, _deviceName);
 
     // 开始录音
-    await _audio.startRecording();
+    try {
+      await _audio.startRecording();
+      _log('正在讲话... (对端 ${_transceiver.peerCount} 台)');
+    } catch (e) {
+      _log('❌ 录音启动失败: $e');
+      _talkStatus = TalkStatus.idle;
+      notifyListeners();
+    }
   }
 
   /// PTT 松开 — 结束通话

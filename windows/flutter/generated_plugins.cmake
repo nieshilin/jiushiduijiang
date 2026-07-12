@@ -6,7 +6,6 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   bonsoir_windows
   connectivity_plus
-  opus_flutter_new_windows
   permission_handler_windows
   record_windows
   url_launcher_windows

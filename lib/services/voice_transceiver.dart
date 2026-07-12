@@ -41,6 +41,9 @@ class VoiceTransceiver {
     this.onPacketLoss,
   });
 
+  /// 当前对端数量
+  int get peerCount => _peers.length;
+
   /// 启动语音收发服务
   Future<void> start(String localIp) async {
     try {
@@ -241,6 +244,7 @@ class VoiceTransceiver {
   /// 每个 Opus 包封装为一个 UDP 包：[4B magic "JOPE"][4B seq][Opus data]
   void sendAudioData(Uint8List opusData) {
     if (opusData.isEmpty) return;
+    if (_peers.isEmpty) return; // 无对端，不发送
 
     // Opus 帧通常 20-80 bytes，远小于 maxPacketSize，无需分包
     // 但保留安全检查：如果数据超长则分包

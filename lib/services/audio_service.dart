@@ -30,6 +30,7 @@ class AudioService {
 
   // 录音 PCM 累积缓冲（等待凑齐一帧再编码）
   final List<int> _pcmAccumulator = [];
+  bool _firstDataLogged = false;
 
   // 语音数据发送回调 — 输出 Opus 编码后的数据
   void Function(Uint8List opusData)? onAudioData;
@@ -61,23 +62,27 @@ class AudioService {
     });
   }
 
-  /// 配置播放器音频上下文 — 强制走扬声器输出
+  /// 配置播放器音频上下文 — 使用 playAndRecord 支持同时录音和播放
+  ///
+  /// iOS 关键：必须用 playAndRecord 而非 playback，否则 record 包
+  /// 无法激活麦克风输入（playback 仅允许输出方向）。
   Future<void> _configureAudioContext() async {
     try {
       await _player.setAudioContext(
         AudioContext(
           android: const AudioContextAndroid(
             isSpeakerphoneOn: true,
-            audioMode: AndroidAudioMode.normal,
+            audioMode: AndroidAudioMode.inCommunication,
             audioFocus: AndroidAudioFocus.gain,
             contentType: AndroidContentType.speech,
-            usageType: AndroidUsageType.media,
+            usageType: AndroidUsageType.voiceCommunication,
             stayAwake: true,
           ),
           iOS: AudioContextIOS(
-            category: AVAudioSessionCategory.playback,
+            category: AVAudioSessionCategory.playAndRecord,
             options: const {
               AVAudioSessionOptions.defaultToSpeaker,
+              AVAudioSessionOptions.allowBluetooth,
             },
           ),
         ),
@@ -129,9 +134,17 @@ class AudioService {
     if (_isRecording) return;
 
     final hasPermission = await _recorder.hasPermission();
-    if (!hasPermission) return;
+    if (!hasPermission) {
+      _log('❌ 录音失败：无麦克风权限');
+      return;
+    }
 
     _ensureEncoder();
+    if (_opusEncoder == null) {
+      _log('❌ 录音失败：Opus 编码器创建失败');
+      return;
+    }
+    _log('🎤 开始录音... (编码器就绪, ${AppConstants.sampleRate}Hz)');
     _pcmAccumulator.clear();
 
     try {
@@ -148,13 +161,17 @@ class AudioService {
       );
 
       _isRecording = true;
+      _firstDataLogged = false;
       _recordSub = stream.listen((Uint8List data) {
         _onRecordData(data);
       }, onError: (e) {
-        _log('录音错误: $e');
+        _log('❌ 录音流错误: $e');
+        _isRecording = false;
       });
+      _log('✅ 录音流已启动');
     } catch (e) {
       _isRecording = false;
+      _log('❌ 启动录音流异常: $e');
       rethrow;
     }
   }
@@ -163,6 +180,11 @@ class AudioService {
   void _onRecordData(Uint8List data) {
     if (_isMuted || onAudioData == null) return;
     if (_opusEncoder == null || _opusEncoder!.destroyed) return;
+
+    if (!_firstDataLogged) {
+      _firstDataLogged = true;
+      _log('📥 收到 PCM 数据: ${data.length} bytes');
+    }
 
     _pcmAccumulator.addAll(data);
 
@@ -181,7 +203,7 @@ class AudioService {
           onAudioData!(opusData);
         }
       } catch (e) {
-        _log('Opus 编码失败: $e');
+        _log('❌ Opus 编码失败: $e');
       }
     }
   }

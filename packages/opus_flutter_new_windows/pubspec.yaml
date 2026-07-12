@@ -1,0 +1,19 @@
+name: opus_flutter_new_windows
+description: Windows implementation of the opus_flutter plugin (local override — no native pluginClass, assets only).
+version: 3.0.2
+
+environment:
+  sdk: ">=2.12.0 <4.0.0"
+  flutter: ">=2.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  opus_flutter_platform_interface: ^3.0.0
+  path_provider: ^2.0.1
+
+flutter:
+  assets:
+    - assets/opus_license.txt
+    - assets/libopus_x64.dll.blob
+    - assets/libopus_x86.dll.blob

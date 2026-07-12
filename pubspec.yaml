@@ -28,6 +28,12 @@ dependencies:
   opus_dart: ^3.0.1
   opus_flutter_new: ^3.0.7
 
+dependency_overrides:
+  # opus_flutter_new_windows 原始包声明了 pluginClass 但无 windows/ 原生目录，
+  # 导致 CMake add_subdirectory 失败。本地 override 去掉 plugin 声明，仅保留 assets。
+  opus_flutter_new_windows:
+    path: packages/opus_flutter_new_windows
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
