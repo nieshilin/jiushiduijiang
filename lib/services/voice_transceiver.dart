@@ -48,6 +48,8 @@ class VoiceTransceiver {
         InternetAddress.anyIPv4,
         AppConstants.voicePort,
         reuseAddress: true,
+        reusePort: Platform.isIOS || Platform.isMacOS,
+        ttl: 1,
       );
       _socket!.listen(_handleDatagram);
     } catch (e) {

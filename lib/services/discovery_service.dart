@@ -55,8 +55,13 @@ class DiscoveryService {
         InternetAddress.anyIPv4,
         AppConstants.discoveryPort,
         reuseAddress: true,
+        reusePort: Platform.isIOS || Platform.isMacOS,
+        ttl: 1,
       );
-      _socket!.broadcastEnabled = true;
+      // broadcastEnabled 仅在非 iOS 平台设置（iOS 不支持 SO_BROADCAST）
+      if (!Platform.isIOS) {
+        _socket!.broadcastEnabled = true;
+      }
       // 加入组播组（iOS 必需，其他平台也兼容）
       try {
         _socket!.joinMulticast(_multicastAddr);
@@ -134,8 +139,12 @@ class DiscoveryService {
           InternetAddress.anyIPv4,
           AppConstants.discoveryPort,
           reuseAddress: true,
+          reusePort: Platform.isIOS || Platform.isMacOS,
+          ttl: 1,
         );
-        _socket!.broadcastEnabled = true;
+        if (!Platform.isIOS) {
+          _socket!.broadcastEnabled = true;
+        }
         // 重新加入组播组
         try {
           _socket!.joinMulticast(_multicastAddr);
@@ -185,7 +194,8 @@ class DiscoveryService {
         // 收到发现请求，回复自己的信息
         final senderName = parts.length > 2 ? parts[2] : 'Unknown';
         _addOrUpdateDevice(senderId, senderName, senderAddr);
-        _sendResponse();
+        // 向发现者发送 unicast 回复（确保 iOS 可达）
+        _sendResponseTo(senderAddr);
         break;
 
       case AppConstants.prefixResponse:
@@ -274,6 +284,8 @@ class DiscoveryService {
         '${AppConstants.prefixDiscovery}:$deviceId:$deviceName';
     final data = utf8.encode(msg);
     _broadcast(data);
+    // 同时发送 unicast 到子网所有 IP（iOS 可靠后备）
+    _sendUnicastToSubnet(data);
   }
 
   /// 公开方法 — 重新发送发现广播
@@ -294,11 +306,15 @@ class DiscoveryService {
     _broadcast(data);
   }
 
-  /// 发送回复
-  Future<void> _sendResponse() async {
+  /// 向指定地址发送 unicast 回复
+  void _sendResponseTo(InternetAddress targetAddr) {
     final msg =
         '${AppConstants.prefixResponse}:$deviceId:$deviceName';
     final data = utf8.encode(msg);
+    try {
+      _socket?.send(data, targetAddr, AppConstants.discoveryPort);
+    } catch (_) {}
+    // 也通过 broadcast 发送，让其他设备也能收到
     _broadcast(data);
   }
 
@@ -323,7 +339,7 @@ class DiscoveryService {
     _broadcast(data);
   }
 
-  /// 发送数据（组播 + 子网广播兼容）
+  /// 发送数据（组播 + 子网广播兼容 + unicast 已知 peer）
   void _broadcast(List<int> data) {
     try {
       // 发送到组播地址（iOS 主要靠此方式发现设备）
@@ -339,8 +355,35 @@ class DiscoveryService {
               data, InternetAddress(subnetBroadcast), AppConstants.discoveryPort);
         }
       }
+
+      // 向所有已知 peer 发送 unicast（确保 iOS 上心跳可达）
+      for (final device in _devices.values) {
+        if (device.isOnline) {
+          _socket?.send(data, device.address, AppConstants.discoveryPort);
+        }
+      }
     } catch (e) {
       // 发送失败静默处理
+    }
+  }
+
+  /// 向子网内所有 IP 发送 unicast 发现包（iOS 的可靠后备方案）
+  void _sendUnicastToSubnet(List<int> data) {
+    if (_localIp.isEmpty) return;
+    final parts = _localIp.split('.');
+    if (parts.length != 4) return;
+
+    final prefix = '${parts[0]}.${parts[1]}.${parts[2]}.';
+    final selfLast = int.tryParse(parts[3]) ?? -1;
+
+    for (var i = 1; i <= 254; i++) {
+      if (i == selfLast) continue; // 跳过自己
+      try {
+        _socket?.send(data, InternetAddress('$prefix$i'),
+            AppConstants.discoveryPort);
+      } catch (_) {
+        // 忽略单个发送失败
+      }
     }
   }
 
