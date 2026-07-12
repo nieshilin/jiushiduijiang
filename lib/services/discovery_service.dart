@@ -5,7 +5,7 @@ import 'package:network_info_plus/network_info_plus.dart';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 设备发现服务 — UDP 广播 + 心跳保活
+/// 设备发现服务 — UDP 广播 + 心跳保活 + 信号质量检测
 class DiscoveryService {
   RawDatagramSocket? _socket;
   Timer? _heartbeatTimer;
@@ -20,6 +20,9 @@ class DiscoveryService {
       StreamController<List<Device>>.broadcast();
   final StreamController<String> _logStream =
       StreamController<String>.broadcast();
+
+  // ping/pong 延迟测量：发送 ping 时记录时间戳
+  final Map<String, int> _pendingPings = {}; // senderId -> timestampMs
 
   Stream<List<Device>> get deviceStream => _deviceStream.stream;
   Stream<String> get logStream => _logStream.stream;
@@ -55,7 +58,7 @@ class DiscoveryService {
       // 发送初始发现广播
       await _sendDiscovery();
 
-      // 启动心跳定时器
+      // 启动心跳定时器（心跳中附带 ping 时间戳）
       _heartbeatTimer = Timer.periodic(
         Duration(seconds: AppConstants.heartbeatInterval),
         (_) => _sendHeartbeat(),
@@ -108,15 +111,43 @@ class DiscoveryService {
         break;
 
       case AppConstants.prefixHeartbeat:
-        // 更新最后在线时间
+        // 更新最后在线时间和心跳计数
         final device = _devices[senderId];
         if (device != null) {
           device.lastSeen = DateTime.now();
+          device.heartbeatCount++;
         } else {
           // 收到未知设备心跳，添加它并发送发现请求
           final senderName = parts.length > 2 ? parts[2] : 'Unknown';
           _addOrUpdateDevice(senderId, senderName, senderAddr);
           _sendDiscovery();
+        }
+        // 如果心跳中附带 ping 时间戳，回复 pong
+        if (parts.length > 3) {
+          _sendPong(senderId, parts[3]);
+        }
+        break;
+
+      case AppConstants.prefixPing:
+        // 收到 ping，回复 pong（原样返回时间戳）
+        final pingTs = parts.length > 2 ? parts[2] : '';
+        if (pingTs.isNotEmpty) {
+          _sendPongTo(senderId, pingTs);
+        }
+        break;
+
+      case AppConstants.prefixPong:
+        // 收到 pong，计算延迟
+        final pingTs = int.tryParse(parts.length > 2 ? parts[2] : '');
+        if (pingTs != null && _pendingPings.containsKey(senderId)) {
+          final sentTs = _pendingPings[senderId]!;
+          final rtt = DateTime.now().millisecondsSinceEpoch - sentTs;
+          final device = _devices[senderId];
+          if (device != null) {
+            device.latencyMs = rtt;
+          }
+          _pendingPings.remove(senderId);
+          _notifyDevices();
         }
         break;
 
@@ -140,6 +171,7 @@ class DiscoveryService {
     if (existing != null) {
       existing.name = name;
       existing.lastSeen = DateTime.now();
+      existing.heartbeatCount++;
     } else {
       _devices[id] = Device(
         id: id,
@@ -147,6 +179,7 @@ class DiscoveryService {
         address: address,
         voicePort: AppConstants.voicePort,
       );
+      _devices[id]!.heartbeatCount = 1;
       _log('发现设备: $name (${address.address})');
       _notifyDevices();
     }
@@ -165,10 +198,15 @@ class DiscoveryService {
     await _sendDiscovery();
   }
 
-  /// 发送心跳
+  /// 发送心跳（附带 ping 时间戳用于延迟测量）
   Future<void> _sendHeartbeat() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 记录 pending ping，等待所有已知设备的 pong
+    for (final device in _devices.values) {
+      _pendingPings[device.id] = now;
+    }
     final msg =
-        '${AppConstants.prefixHeartbeat}:$deviceId:$deviceName';
+        '${AppConstants.prefixHeartbeat}:$deviceId:$deviceName:$now';
     final data = utf8.encode(msg);
     _broadcast(data);
   }
@@ -177,6 +215,20 @@ class DiscoveryService {
   Future<void> _sendResponse() async {
     final msg =
         '${AppConstants.prefixResponse}:$deviceId:$deviceName';
+    final data = utf8.encode(msg);
+    _broadcast(data);
+  }
+
+  /// 发送 pong（回复心跳中的 ping）
+  void _sendPong(String targetId, String pingTs) {
+    final msg = '${AppConstants.prefixPong}:$deviceId:$pingTs';
+    final data = utf8.encode(msg);
+    _broadcast(data);
+  }
+
+  /// 发送 pong 到指定地址
+  void _sendPongTo(String targetId, String pingTs) {
+    final msg = '${AppConstants.prefixPong}:$deviceId:$pingTs';
     final data = utf8.encode(msg);
     _broadcast(data);
   }
@@ -224,6 +276,7 @@ class DiscoveryService {
       for (final id in offlineIds) {
         _log('设备超时离线: ${_devices[id]?.name}');
         _devices.remove(id);
+        _pendingPings.remove(id);
       }
       _notifyDevices();
     }

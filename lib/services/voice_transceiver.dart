@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 语音数据传输收发器 — UDP 收发
+/// 语音数据传输收发器 — UDP 收发（语音 + 文字消息）
 class VoiceTransceiver {
   RawDatagramSocket? _socket;
   final List<Device> _peers = [];
@@ -17,6 +17,8 @@ class VoiceTransceiver {
   final void Function(String senderIp, String senderName)? onVoiceStart;
   // 收到通话结束信号回调
   final void Function(String senderIp)? onVoiceEnd;
+  // 收到文字消息回调
+  final void Function(String senderIp, String senderId, String senderName, String message)? onMessage;
 
   int _seqNum = 0;
 
@@ -24,6 +26,7 @@ class VoiceTransceiver {
     this.onAudioData,
     this.onVoiceStart,
     this.onVoiceEnd,
+    this.onMessage,
   });
 
   /// 启动语音收发服务
@@ -96,6 +99,25 @@ class VoiceTransceiver {
       onVoiceEnd?.call(senderIp);
       return;
     }
+
+    if (asString.startsWith(AppConstants.prefixMessage)) {
+      // 文字消息: JDHI_MSG:senderId:senderName:messageContent
+      // 注意: messageContent 可能包含冒号，所以用 split with limit
+      final firstColon = asString.indexOf(':');
+      final afterPrefix = asString.substring(firstColon + 1);
+      final secondColon = afterPrefix.indexOf(':');
+      if (secondColon < 0) return;
+      final senderId = afterPrefix.substring(0, secondColon);
+      final rest = afterPrefix.substring(secondColon + 1);
+      final thirdColon = rest.indexOf(':');
+      if (thirdColon < 0) return;
+      final senderName = rest.substring(0, thirdColon);
+      final messageContent = rest.substring(thirdColon + 1);
+      if (messageContent.isNotEmpty) {
+        onMessage?.call(senderIp, senderId, senderName, messageContent);
+      }
+      return;
+    }
   }
 
   /// 更新对端设备列表
@@ -114,6 +136,17 @@ class VoiceTransceiver {
   /// 发送通话结束信号
   void sendVoiceEnd(String senderId) {
     final msg = '${AppConstants.prefixVoiceEnd}:$senderId';
+    final data = utf8.encode(msg);
+    _sendToAllPeers(data);
+  }
+
+  /// 发送文字消息
+  void sendMessage(String senderId, String senderName, String message) {
+    // 截断超长消息
+    final truncated = message.length > AppConstants.maxMessageLength
+        ? message.substring(0, AppConstants.maxMessageLength)
+        : message;
+    final msg = '${AppConstants.prefixMessage}:$senderId:$senderName:$truncated';
     final data = utf8.encode(msg);
     _sendToAllPeers(data);
   }

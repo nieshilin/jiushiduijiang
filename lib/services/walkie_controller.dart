@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:jiudhiduijiang/models/device.dart';
+import 'package:jiudhiduijiang/models/chat_message.dart';
 import 'package:jiudhiduijiang/services/audio_service.dart';
 import 'package:jiudhiduijiang/services/discovery_service.dart';
 import 'package:jiudhiduijiang/services/voice_transceiver.dart';
@@ -36,6 +37,10 @@ class WalkieController extends ChangeNotifier {
   String _receivingFrom = '';
   String _lastLog = '';
 
+  // ── 消息列表 ──
+  final List<ChatMessage> _messages = [];
+  int _unreadCount = 0;
+
   WalkieController({String? deviceId, String? deviceName})
       : _deviceId = deviceId ?? const Uuid().v4(),
         _deviceName = deviceName ?? '对讲机-${DateTime.now().millisecondsSinceEpoch % 10000}' {
@@ -45,6 +50,7 @@ class WalkieController extends ChangeNotifier {
       onAudioData: _onRemoteAudioData,
       onVoiceStart: _onRemoteVoiceStart,
       onVoiceEnd: _onRemoteVoiceEnd,
+      onMessage: _onRemoteMessage,
     );
   }
 
@@ -61,6 +67,18 @@ class WalkieController extends ChangeNotifier {
   String get receivingFrom => _receivingFrom;
   String get lastLog => _lastLog;
   bool get isPTTActive => _talkStatus == TalkStatus.transmitting;
+
+  List<ChatMessage> get messages => List.unmodifiable(_messages);
+  int get unreadCount => _unreadCount;
+  int get messageCount => _messages.length;
+
+  /// 平均信号质量 (0~4)，基于所有在线设备
+  int get averageSignalQuality {
+    final online = _devices.where((d) => d.isOnline).toList();
+    if (online.isEmpty) return 0;
+    final avg = online.map((d) => d.signalQuality).reduce((a, b) => a + b) / online.length;
+    return avg.round();
+  }
 
   /// 初始化
   Future<void> init() async {
@@ -187,6 +205,59 @@ class WalkieController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── 文字消息 ──
+
+  /// 发送文字消息
+  void sendMessage(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    final msg = ChatMessage(
+      id: '${_deviceId}_${DateTime.now().millisecondsSinceEpoch}',
+      senderId: _deviceId,
+      senderName: _deviceName,
+      content: trimmed,
+      timestamp: DateTime.now(),
+      isMe: true,
+    );
+    _messages.add(msg);
+    _transceiver.sendMessage(_deviceId, _deviceName, trimmed);
+    notifyListeners();
+  }
+
+  /// 收到对端文字消息
+  void _onRemoteMessage(String senderIp, String senderId, String senderName, String message) {
+    final msg = ChatMessage(
+      id: '${senderId}_${DateTime.now().millisecondsSinceEpoch}',
+      senderId: senderId,
+      senderName: senderName,
+      content: message,
+      timestamp: DateTime.now(),
+      isMe: false,
+    );
+    _messages.add(msg);
+    _unreadCount++;
+    // 收到消息时震动提醒
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      HapticFeedback.lightImpact();
+    }
+    notifyListeners();
+  }
+
+  /// 标记消息已读
+  void markMessagesRead() {
+    _unreadCount = 0;
+    notifyListeners();
+  }
+
+  /// 清空消息
+  void clearMessages() {
+    _messages.clear();
+    _unreadCount = 0;
+    notifyListeners();
+  }
+
   // ── 音量控制 ──
 
   Future<void> setVolume(double vol) async {
@@ -197,6 +268,12 @@ class WalkieController extends ChangeNotifier {
 
   Future<void> toggleMute() async {
     _isMuted = !_isMuted;
+    await _audio.setMuted(_isMuted);
+    notifyListeners();
+  }
+
+  Future<void> setMuted(bool muted) async {
+    _isMuted = muted;
     await _audio.setMuted(_isMuted);
     notifyListeners();
   }
@@ -227,6 +304,19 @@ class WalkieController extends ChangeNotifier {
       await prefs.setString('device_id', id);
     }
     return id;
+  }
+
+  /// 启动页开关持久化（默认开启）
+  static const _keySplashEnabled = 'splash_enabled';
+
+  static Future<bool> loadSplashEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySplashEnabled) ?? true;
+  }
+
+  static Future<void> saveSplashEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySplashEnabled, enabled);
   }
 
   void _log(String msg) {

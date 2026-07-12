@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/models/device.dart';
+import 'package:jiudhiduijiang/widgets/signal_indicator.dart';
 
-/// 在线成员列表 — 现代极简风格
+/// 在线成员列表 — 现代极简风格 + 信号质量指示
 class DeviceList extends StatelessWidget {
   final List<Device> devices;
   final String localDeviceName;
@@ -23,15 +24,20 @@ class DeviceList extends StatelessWidget {
       isLocal: true,
       isOnline: true,
       isSpeaking: speakingName == localDeviceName,
+      signalQuality: 4, // 本机信号满格
     );
 
     final onlineDevices = devices.where((d) => d.isOnline).toList();
-    final memberList = [localEntry, ...onlineDevices.map((d) => _MemberItem(
-      name: d.name,
-      isLocal: false,
-      isOnline: d.isOnline,
-      isSpeaking: speakingName == d.name,
-    ))];
+    final memberList = [
+      localEntry,
+      ...onlineDevices.map((d) => _MemberItem(
+            name: d.name,
+            isLocal: false,
+            isOnline: d.isOnline,
+            isSpeaking: speakingName == d.name,
+            signalQuality: d.signalQuality,
+          ))
+    ];
 
     if (memberList.length <= 1 && onlineDevices.isEmpty) {
       return _buildEmptyState();
@@ -211,6 +217,9 @@ class DeviceList extends StatelessWidget {
               ],
             ),
           ),
+          // 信号质量指示器
+          if (!member.isSpeaking)
+            SignalIndicator(quality: member.signalQuality, size: 14),
           // 讲话指示器
           if (member.isSpeaking)
             Container(
@@ -237,16 +246,7 @@ class DeviceList extends StatelessWidget {
               ),
             )
           else
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: member.isOnline
-                    ? WalkieTheme.online.withValues(alpha: 0.8)
-                    : WalkieTheme.textMuted,
-              ),
-            ),
+            const SizedBox(width: 8),
         ],
       ),
     );
@@ -276,11 +276,13 @@ class _MemberItem {
   final bool isLocal;
   final bool isOnline;
   final bool isSpeaking;
+  final int signalQuality;
 
   _MemberItem({
     required this.name,
     required this.isLocal,
     required this.isOnline,
     required this.isSpeaking,
+    this.signalQuality = 4,
   });
 }

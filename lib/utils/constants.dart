@@ -37,4 +37,13 @@ class AppConstants {
   static const String prefixVoiceData = 'JDHI_VD';
   static const String prefixVoiceEnd = 'JDHI_VE';
   static const String prefixLeave = 'JDHI_LEAVE';
+  static const String prefixMessage = 'JDHI_MSG';
+  static const String prefixPing = 'JDHI_PNG';
+  static const String prefixPong = 'JDHI_POG';
+
+  /// 文字消息最大长度
+  static const int maxMessageLength = 500;
+
+  /// 信号质量检测间隔（秒）
+  static const int qualityCheckInterval = 3;
 }

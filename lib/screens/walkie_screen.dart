@@ -3,6 +3,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
+import 'package:jiudhiduijiang/screens/settings_screen.dart';
+import 'package:jiudhiduijiang/screens/message_panel.dart';
 import 'package:jiudhiduijiang/widgets/led_display.dart';
 import 'package:jiudhiduijiang/widgets/ptt_button.dart';
 import 'package:jiudhiduijiang/widgets/device_list.dart';
@@ -128,6 +130,134 @@ class _WalkieScreenState extends State<WalkieScreen> {
     );
   }
 
+  void _openSettings(WalkieController c) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => SettingsScreen(controller: c),
+      ),
+    );
+  }
+
+  void _openMessages(WalkieController c) {
+    c.markMessagesRead();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => MessagePanel(
+        messages: c.messages,
+        localDeviceName: c.deviceName,
+        onSend: (text) => c.sendMessage(text),
+      ),
+    );
+  }
+
+  void _showVolumePopup(WalkieController c) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WalkieTheme.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: WalkieTheme.border),
+        ),
+        title: Row(
+          children: [
+            Icon(
+              c.isMuted ? Icons.volume_off : Icons.volume_up,
+              color: WalkieTheme.accent,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              '音量调节',
+              style: TextStyle(
+                color: WalkieTheme.textPrimary,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: AnimatedBuilder(
+          animation: c,
+          builder: (context, _) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 音量滑块
+                Row(
+                  children: [
+                    const Icon(Icons.volume_down,
+                        size: 20, color: WalkieTheme.textSecondary),
+                    Expanded(
+                      child: Slider(
+                        value: c.volume,
+                        min: 0.0,
+                        max: 1.0,
+                        divisions: 20,
+                        activeColor: WalkieTheme.accent,
+                        inactiveColor: WalkieTheme.border,
+                        thumbColor: WalkieTheme.accent,
+                        onChanged: c.isMuted
+                            ? null
+                            : (val) => c.setVolume(val),
+                      ),
+                    ),
+                    const Icon(Icons.volume_up,
+                        size: 20, color: WalkieTheme.textSecondary),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${(c.volume * 100).round()}%',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: WalkieTheme.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // 静音开关
+                ListTile(
+                  leading: Icon(
+                    c.isMuted ? Icons.volume_off : Icons.volume_up,
+                    color: c.isMuted ? WalkieTheme.txRed : WalkieTheme.textSecondary,
+                    size: 22,
+                  ),
+                  title: Text(
+                    '静音',
+                    style: TextStyle(
+                      fontSize: 15,
+                      color: c.isMuted ? WalkieTheme.txRed : WalkieTheme.textPrimary,
+                    ),
+                  ),
+                  trailing: Switch(
+                    value: c.isMuted,
+                    onChanged: (val) => c.setMuted(val),
+                    activeColor: WalkieTheme.accent,
+                    inactiveThumbColor: WalkieTheme.textMuted,
+                    inactiveTrackColor: WalkieTheme.border,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭',
+                style: TextStyle(color: WalkieTheme.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -156,7 +286,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
   Widget _buildMainBody(WalkieController c) {
     return Column(
       children: [
-        // 顶部状态栏 + 频道选择
+        // 顶部状态栏 + 频道选择 + 功能按钮
         _buildTopBar(c),
         const SizedBox(height: 24),
         // 绿色 LCD 大屏
@@ -173,6 +303,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
               isTransmitting: c.talkStatus == TalkStatus.transmitting,
               isReceiving: c.talkStatus == TalkStatus.receiving,
               isConnected: c.connStatus == ConnectionStatus.connected,
+              signalQuality: c.averageSignalQuality,
             ),
           ),
         ),
@@ -192,18 +323,8 @@ class _WalkieScreenState extends State<WalkieScreen> {
           ),
         ),
         const SizedBox(height: 24),
-        // 大圆 PTT 按钮
-        PttButton(
-          isPressed: c.isPTTActive,
-          isTransmitting: c.talkStatus == TalkStatus.transmitting,
-          onPTTChanged: (pressed) {
-            if (pressed) {
-              c.ptDown();
-            } else {
-              c.ptUp();
-            }
-          },
-        ),
+        // 功能按钮行 + 大圆 PTT 按钮
+        _buildActionRow(c),
         const SizedBox(height: 36),
       ],
     );
@@ -270,17 +391,125 @@ class _WalkieScreenState extends State<WalkieScreen> {
               ],
             ),
           ),
-          // 更多菜单（占位）
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: WalkieTheme.surfaceElevated,
-              shape: BoxShape.circle,
-              border: Border.all(color: WalkieTheme.border),
+          // 设置按钮
+          GestureDetector(
+            onTap: () => _openSettings(c),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: WalkieTheme.surfaceElevated,
+                shape: BoxShape.circle,
+                border: Border.all(color: WalkieTheme.border),
+              ),
+              child: const Icon(Icons.settings,
+                  size: 20, color: WalkieTheme.textSecondary),
             ),
-            child: const Icon(Icons.more_horiz,
-                size: 20, color: WalkieTheme.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// PTT 按钮上方的功能按钮行 — 音量、消息
+  Widget _buildActionRow(WalkieController c) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 40),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // 音量快捷按钮
+          _buildActionButton(
+            icon: c.isMuted ? Icons.volume_off : Icons.volume_up,
+            label: c.isMuted ? '已静音' : '音量',
+            color: c.isMuted ? WalkieTheme.txRed : WalkieTheme.textSecondary,
+            onTap: () => _showVolumePopup(c),
+          ),
+          // PTT 按钮
+          PttButton(
+            isPressed: c.isPTTActive,
+            isTransmitting: c.talkStatus == TalkStatus.transmitting,
+            onPTTChanged: (pressed) {
+              if (pressed) {
+                c.ptDown();
+              } else {
+                c.ptUp();
+              }
+            },
+          ),
+          // 消息按钮
+          _buildActionButton(
+            icon: Icons.chat_bubble_outline,
+            label: '消息',
+            color: WalkieTheme.textSecondary,
+            badge: c.unreadCount,
+            onTap: () => _openMessages(c),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    int badge = 0,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: WalkieTheme.surfaceElevated,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: WalkieTheme.border),
+                ),
+                child: Icon(icon, size: 22, color: color),
+              ),
+              if (badge > 0)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: WalkieTheme.txRed,
+                      shape: BoxShape.circle,
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 16,
+                      minHeight: 16,
+                    ),
+                    child: Text(
+                      badge > 99 ? '99+' : '$badge',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              color: color,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ],
       ),

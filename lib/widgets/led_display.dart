@@ -2,7 +2,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 
-/// 现代绿色 LCD 大屏 — 显示在线人数、设备名、讲话者
+/// 现代绿色 LCD 大屏 — 显示在线人数、设备名、讲话者、信号质量
 class LedDisplay extends StatefulWidget {
   final String deviceId;
   final String deviceName;
@@ -12,6 +12,7 @@ class LedDisplay extends StatefulWidget {
   final bool isTransmitting;
   final bool isReceiving;
   final bool isConnected;
+  final int signalQuality; // 0~4
 
   const LedDisplay({
     super.key,
@@ -23,6 +24,7 @@ class LedDisplay extends StatefulWidget {
     required this.isTransmitting,
     required this.isReceiving,
     required this.isConnected,
+    this.signalQuality = 4,
   });
 
   @override
@@ -176,28 +178,30 @@ class _LedDisplayState extends State<LedDisplay>
       );
     }
 
+    // 使用真实信号质量，讲话时叠加动画呼吸效果
     return AnimatedBuilder(
       animation: _waveController,
       builder: (context, child) {
+        final active = widget.isTransmitting || widget.isReceiving;
+        final wave = active
+            ? (math.sin(_waveController.value * 2 * math.pi) + 1) / 2
+            : 0.0;
+
         return Row(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: List.generate(4, (i) {
-            final active = widget.isTransmitting || widget.isReceiving;
-            final wave = active
-                ? (math.sin((_waveController.value * 2 * math.pi) +
-                            i * 0.8) +
-                        1) /
-                    2
-                : 1.0;
+            final isActive = i < widget.signalQuality;
+            // 讲话时让激活的竖条有呼吸感
+            final boost = active && isActive ? wave * 0.3 : 0.0;
             return Container(
               width: 4,
               height: 6 + i * 4.0,
               margin: const EdgeInsets.only(left: 2),
               decoration: BoxDecoration(
-                color: WalkieTheme.lcdText.withValues(
-                  alpha: active ? 0.4 + wave * 0.6 : 1.0,
-                ),
+                color: isActive
+                    ? WalkieTheme.lcdText.withValues(alpha: 0.6 + boost)
+                    : WalkieTheme.lcdTextDim.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(2),
               ),
             );
