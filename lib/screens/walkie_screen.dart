@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'package:jiudhiduijiang/l10n/app_localizations.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
 import 'package:jiudhiduijiang/screens/settings_screen.dart';
@@ -8,6 +9,7 @@ import 'package:jiudhiduijiang/screens/message_panel.dart';
 import 'package:jiudhiduijiang/widgets/led_display.dart';
 import 'package:jiudhiduijiang/widgets/ptt_button.dart';
 import 'package:jiudhiduijiang/widgets/device_list.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// 对讲机主界面 — 现代极简移动端风格
 class WalkieScreen extends StatefulWidget {
@@ -34,9 +36,62 @@ class _WalkieScreenState extends State<WalkieScreen> {
     try {
       await widget.controller.init();
       setState(() => _isInitialized = true);
+      // 检查权限是否被拒绝
+      if (widget.controller.micPermissionDenied) {
+        _showPermissionDialog();
+      }
     } catch (e) {
       setState(() => _initError = e.toString());
     }
+  }
+
+  /// 权限被拒绝时显示引导弹窗
+  void _showPermissionDialog() {
+    final l = AppLocalizations.of(context)!;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WalkieTheme.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: WalkieTheme.border),
+        ),
+        title: Row(
+          children: [
+            const Icon(Icons.mic_off, color: WalkieTheme.txRed, size: 24),
+            const SizedBox(width: 8),
+            Text(
+              l.micPermissionDenied,
+              style: const TextStyle(
+                color: WalkieTheme.textPrimary,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          l.micPermissionGuide,
+          style: const TextStyle(color: WalkieTheme.textSecondary, fontSize: 14, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(l.later,
+                style: const TextStyle(color: WalkieTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              openAppSettings();
+            },
+            child: Text(l.goToSettings,
+                style: const TextStyle(color: WalkieTheme.accent)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -45,35 +100,34 @@ class _WalkieScreenState extends State<WalkieScreen> {
     super.dispose();
   }
 
-  String _getChannelName(WalkieController c) {
-    return '默认频道';
-  }
-
   String _getSpeakerText(WalkieController c) {
+    final l = AppLocalizations.of(context)!;
     switch (c.talkStatus) {
       case TalkStatus.transmitting:
-        return '你正在讲话';
+        return l.youSpeaking;
       case TalkStatus.receiving:
-        return '${c.receivingFrom} 正在讲话';
+        return l.peerSpeaking(c.receivingFrom);
       case TalkStatus.idle:
-        return '频道空闲';
+        return l.standby;
     }
   }
 
   String _getStatusSubtext(WalkieController c) {
+    final l = AppLocalizations.of(context)!;
     switch (c.talkStatus) {
       case TalkStatus.transmitting:
-        return '松开按钮结束通话';
+        return l.releaseToEnd;
       case TalkStatus.receiving:
-        return '接收语音中';
+        return l.receivingVoice;
       case TalkStatus.idle:
         return c.connStatus == ConnectionStatus.connected
-            ? '在线 · ${c.onlineCount} 人'
-            : '连接中...';
+            ? l.onlineCount(c.onlineCount)
+            : l.connecting;
     }
   }
 
   void _showNameEditor(BuildContext context, WalkieController c) {
+    final l = AppLocalizations.of(context)!;
     final controller = TextEditingController(text: c.deviceName);
     showDialog(
       context: context,
@@ -83,9 +137,9 @@ class _WalkieScreenState extends State<WalkieScreen> {
           borderRadius: BorderRadius.circular(20),
           side: const BorderSide(color: WalkieTheme.border),
         ),
-        title: const Text(
-          '设置设备名称',
-          style: TextStyle(
+        title: Text(
+          l.setDeviceName,
+          style: const TextStyle(
             color: WalkieTheme.textPrimary,
             fontSize: 17,
             fontWeight: FontWeight.w600,
@@ -96,23 +150,23 @@ class _WalkieScreenState extends State<WalkieScreen> {
           autofocus: true,
           maxLength: 20,
           style: const TextStyle(color: WalkieTheme.textPrimary),
-          decoration: const InputDecoration(
-            hintText: '输入设备名称',
-            hintStyle: TextStyle(color: WalkieTheme.textMuted),
-            enabledBorder: UnderlineInputBorder(
+          decoration: InputDecoration(
+            hintText: l.enterDeviceName,
+            hintStyle: const TextStyle(color: WalkieTheme.textMuted),
+            enabledBorder: const UnderlineInputBorder(
               borderSide: BorderSide(color: WalkieTheme.border),
             ),
-            focusedBorder: UnderlineInputBorder(
+            focusedBorder: const UnderlineInputBorder(
               borderSide: BorderSide(color: WalkieTheme.accent),
             ),
-            counterStyle: TextStyle(color: WalkieTheme.textMuted),
+            counterStyle: const TextStyle(color: WalkieTheme.textMuted),
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消',
-                style: TextStyle(color: WalkieTheme.textSecondary)),
+            child: Text(l.cancel,
+                style: const TextStyle(color: WalkieTheme.textSecondary)),
           ),
           TextButton(
             onPressed: () {
@@ -122,8 +176,8 @@ class _WalkieScreenState extends State<WalkieScreen> {
               }
               Navigator.pop(ctx);
             },
-            child: const Text('确定',
-                style: TextStyle(color: WalkieTheme.accent)),
+            child: Text(l.confirm,
+                style: const TextStyle(color: WalkieTheme.accent)),
           ),
         ],
       ),
@@ -154,6 +208,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
   }
 
   void _showVolumePopup(WalkieController c) {
+    final l = AppLocalizations.of(context)!;
     showDialog(
       context: context,
       barrierDismissible: true,
@@ -171,9 +226,9 @@ class _WalkieScreenState extends State<WalkieScreen> {
               size: 20,
             ),
             const SizedBox(width: 8),
-            const Text(
-              '音量调节',
-              style: TextStyle(
+            Text(
+              l.volumeControl,
+              style: const TextStyle(
                 color: WalkieTheme.textPrimary,
                 fontSize: 17,
                 fontWeight: FontWeight.w600,
@@ -228,7 +283,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
                     size: 22,
                   ),
                   title: Text(
-                    '静音',
+                    l.mute,
                     style: TextStyle(
                       fontSize: 15,
                       color: c.isMuted ? WalkieTheme.txRed : WalkieTheme.textPrimary,
@@ -250,34 +305,95 @@ class _WalkieScreenState extends State<WalkieScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('关闭',
-                style: TextStyle(color: WalkieTheme.accent)),
+            child: Text(l.close,
+                style: const TextStyle(color: WalkieTheme.accent)),
           ),
         ],
       ),
     );
   }
 
+  /// 退出确认弹窗
+  Future<bool> _showExitConfirm() async {
+    final l = AppLocalizations.of(context)!;
+    return await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: WalkieTheme.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: WalkieTheme.border),
+        ),
+        title: Text(
+          l.exitApp,
+          style: const TextStyle(
+            color: WalkieTheme.textPrimary,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        content: Text(
+          l.exitConfirm,
+          style: const TextStyle(color: WalkieTheme.textSecondary, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(l.cancel,
+                style: const TextStyle(color: WalkieTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(l.exit,
+                style: const TextStyle(color: WalkieTheme.txRed)),
+          ),
+        ],
+      ),
+    ) ?? false;
+  }
+
+  /// 清理并退出
+  void _cleanupAndExit() {
+    // 停止录音（如果正在进行）
+    if (widget.controller.talkStatus == TalkStatus.transmitting) {
+      widget.controller.ptUp();
+    }
+    // 停止播放
+    // 控制器的 dispose 会处理服务停止和资源释放
+    // 发送 leave 通知由 discovery_service.stop() 处理
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: WalkieTheme.background,
-      body: SafeArea(
-        child: AnimatedBuilder(
-          animation: widget.controller,
-          builder: (context, _) {
-            final c = widget.controller;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        final shouldExit = await _showExitConfirm();
+        if (shouldExit && context.mounted) {
+          _cleanupAndExit();
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: WalkieTheme.background,
+        body: SafeArea(
+          child: AnimatedBuilder(
+            animation: widget.controller,
+            builder: (context, _) {
+              final c = widget.controller;
 
-            if (_initError != null) {
-              return _buildErrorView();
-            }
+              if (_initError != null) {
+                return _buildErrorView();
+              }
 
-            if (!_isInitialized) {
-              return _buildLoadingView();
-            }
+              if (!_isInitialized) {
+                return _buildLoadingView();
+              }
 
-            return _buildMainBody(c);
-          },
+              return _buildMainBody(c);
+            },
+          ),
         ),
       ),
     );
@@ -286,7 +402,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
   Widget _buildMainBody(WalkieController c) {
     return Column(
       children: [
-        // 顶部状态栏 + 频道选择 + 功能按钮
+        // 顶部状态栏 + 功能按钮
         _buildTopBar(c),
         const SizedBox(height: 24),
         // 绿色 LCD 大屏
@@ -363,34 +479,6 @@ class _WalkieScreenState extends State<WalkieScreen> {
               ),
             ),
           ),
-          // 频道选择器
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: WalkieTheme.surfaceElevated,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: WalkieTheme.border),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.wifi_tethering,
-                    size: 14, color: WalkieTheme.accent),
-                const SizedBox(width: 6),
-                Text(
-                  _getChannelName(c),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: WalkieTheme.textPrimary,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                const Icon(Icons.keyboard_arrow_down,
-                    size: 16, color: WalkieTheme.textSecondary),
-              ],
-            ),
-          ),
           // 设置按钮
           GestureDetector(
             onTap: () => _openSettings(c),
@@ -411,8 +499,8 @@ class _WalkieScreenState extends State<WalkieScreen> {
     );
   }
 
-  /// PTT 按钮上方的功能按钮行 — 音量、消息
   Widget _buildActionRow(WalkieController c) {
+    final l = AppLocalizations.of(context)!;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 40),
       child: Row(
@@ -421,7 +509,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
           // 音量快捷按钮
           _buildActionButton(
             icon: c.isMuted ? Icons.volume_off : Icons.volume_up,
-            label: c.isMuted ? '已静音' : '音量',
+            label: c.isMuted ? l.muted : l.volume,
             color: c.isMuted ? WalkieTheme.txRed : WalkieTheme.textSecondary,
             onTap: () => _showVolumePopup(c),
           ),
@@ -440,7 +528,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
           // 消息按钮
           _buildActionButton(
             icon: Icons.chat_bubble_outline,
-            label: '消息',
+            label: l.messages,
             color: WalkieTheme.textSecondary,
             badge: c.unreadCount,
             onTap: () => _openMessages(c),
@@ -517,11 +605,12 @@ class _WalkieScreenState extends State<WalkieScreen> {
   }
 
   Widget _buildLoadingView() {
-    return const Center(
+    final l = AppLocalizations.of(context)!;
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          SizedBox(
+          const SizedBox(
             width: 40,
             height: 40,
             child: CircularProgressIndicator(
@@ -529,10 +618,10 @@ class _WalkieScreenState extends State<WalkieScreen> {
               strokeWidth: 3,
             ),
           ),
-          SizedBox(height: 16),
+          const SizedBox(height: 16),
           Text(
-            '正在连接频道...',
-            style: TextStyle(
+            l.connecting,
+            style: const TextStyle(
               fontSize: 14,
               color: WalkieTheme.textSecondary,
               fontWeight: FontWeight.w500,
@@ -544,6 +633,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
   }
 
   Widget _buildErrorView() {
+    final l = AppLocalizations.of(context)!;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -552,9 +642,9 @@ class _WalkieScreenState extends State<WalkieScreen> {
           children: [
             const Icon(Icons.error_outline, size: 48, color: WalkieTheme.txRed),
             const SizedBox(height: 16),
-            const Text(
-              '初始化失败',
-              style: TextStyle(
+            Text(
+              l.initFailed,
+              style: const TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
                 color: WalkieTheme.txRed,
@@ -582,7 +672,7 @@ class _WalkieScreenState extends State<WalkieScreen> {
                 backgroundColor: WalkieTheme.surfaceElevated,
                 foregroundColor: WalkieTheme.accent,
               ),
-              child: const Text('重试'),
+              child: Text(l.retry),
             ),
           ],
         ),

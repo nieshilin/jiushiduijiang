@@ -5,6 +5,20 @@ class AppConstants {
   /// 应用名称
   static const String appName = '就是对讲';
 
+  /// 应用版本号
+  static const String appVersion = '1.0.0';
+
+  /// 应用构建号
+  static const int appBuildNumber = 1;
+
+  /// 作者
+  static const String authorName = '小聂';
+  static const String authorEmail = 'xiaonie@xiaonie.me';
+  static const String authorBlog = 'xiaonie.me';
+
+  /// GitHub 仓库
+  static const String githubRepo = 'https://github.com/nieshilin/jiushiduijiang';
+
   /// 设备发现 UDP 广播端口
   static const int discoveryPort = 45670;
 
@@ -46,4 +60,5 @@ class AppConstants {
 
   /// 信号质量检测间隔（秒）
   static const int qualityCheckInterval = 3;
+
 }

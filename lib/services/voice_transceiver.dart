@@ -19,14 +19,26 @@ class VoiceTransceiver {
   final void Function(String senderIp)? onVoiceEnd;
   // 收到文字消息回调
   final void Function(String senderIp, String senderId, String senderName, String message)? onMessage;
+  // 丢包统计回调
+  final void Function(String senderIp, int lostPackets, int totalPackets)? onPacketLoss;
 
   int _seqNum = 0;
+
+  // ── 每个发送者的序列号追踪 ──
+  final Map<String, int> _lastSeq = {};       // senderIp -> 上次收到的 seq
+  final Map<String, int> _lostPackets = {};   // senderIp -> 累计丢包数
+  final Map<String, int> _totalPackets = {};  // senderIp -> 累计收到的包数
+  // jitter buffer: 每个发送者的待排序包队列
+  final Map<String, List<_VoicePacket>> _jitterBuffer = {};
+  // 每个发送者的 jitter 刷新定时器
+  final Map<String, Timer> _jitterTimers = {};
 
   VoiceTransceiver({
     this.onAudioData,
     this.onVoiceStart,
     this.onVoiceEnd,
     this.onMessage,
+    this.onPacketLoss,
   });
 
   /// 启动语音收发服务
@@ -64,15 +76,20 @@ class VoiceTransceiver {
   void _processDatagram(Uint8List data, String senderIp) {
     if (data.length < 4) return;
 
-    // ⚠️ 必须先检查二进制语音数据包，再尝试 UTF-8 解码
-    // 二进制 PCM 数据不是合法 UTF-8，直接 utf8.decode 会抛异常导致语音数据丢失
+    // 先检查二进制语音数据包
     if (data.length >= 8) {
       // 检查 magic "JDVD" (little-endian: 0x4A, 0x44, 0x56, 0x44)
       if (data[0] == 0x4A && data[1] == 0x44 &&
           data[2] == 0x56 && data[3] == 0x44) {
+        // 解析序列号
+        final byteData = data.buffer.asByteData(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
+        final seq = byteData.getUint32(4, Endian.little);
         final pcmData = data.sublist(8);
         if (pcmData.isNotEmpty) {
-          onAudioData?.call(senderIp, pcmData);
+          _handleVoicePacket(senderIp, seq, pcmData);
         }
         return;
       }
@@ -87,22 +104,26 @@ class VoiceTransceiver {
     }
 
     if (asString.startsWith(AppConstants.prefixVoiceStart)) {
-      // 通话开始信号: JDHI_VS:senderId:senderName
       final parts = asString.split(':');
       final senderName = parts.length > 2 ? parts[2] : 'Unknown';
+      // 通话开始时重置该发送者的 seq 追踪
+      _lastSeq.remove(senderIp);
+      _lostPackets.remove(senderIp);
+      _totalPackets.remove(senderIp);
       onVoiceStart?.call(senderIp, senderName);
       return;
     }
 
     if (asString.startsWith(AppConstants.prefixVoiceEnd)) {
-      // 通话结束信号: JDHI_VE:senderId
+      // 通话结束时刷新 jitter buffer
+      _flushJitterBuffer(senderIp);
+      _jitterTimers[senderIp]?.cancel();
+      _jitterTimers.remove(senderIp);
       onVoiceEnd?.call(senderIp);
       return;
     }
 
     if (asString.startsWith(AppConstants.prefixMessage)) {
-      // 文字消息: JDHI_MSG:senderId:senderName:messageContent
-      // 注意: messageContent 可能包含冒号，所以用 split with limit
       final firstColon = asString.indexOf(':');
       final afterPrefix = asString.substring(firstColon + 1);
       final secondColon = afterPrefix.indexOf(':');
@@ -118,6 +139,69 @@ class VoiceTransceiver {
       }
       return;
     }
+  }
+
+  /// 处理收到的语音包 — 检测丢包 + jitter buffer 排序
+  void _handleVoicePacket(String senderIp, int seq, Uint8List pcmData) {
+    _totalPackets[senderIp] = (_totalPackets[senderIp] ?? 0) + 1;
+
+    final lastSeq = _lastSeq[senderIp];
+    if (lastSeq != null) {
+      // 检测丢包：期望 seq = lastSeq + 1
+      final expected = lastSeq + 1;
+      if (seq > expected) {
+        // 有丢包
+        final lost = seq - expected;
+        _lostPackets[senderIp] = (_lostPackets[senderIp] ?? 0) + lost;
+        onPacketLoss?.call(
+          senderIp,
+          _lostPackets[senderIp]!,
+          _totalPackets[senderIp]!,
+        );
+      }
+      // seq < lastSeq 说明是乱序/重复包，忽略丢包检测
+    }
+    _lastSeq[senderIp] = seq;
+
+    // 加入 jitter buffer
+    _jitterBuffer.putIfAbsent(senderIp, () => []);
+    _jitterBuffer[senderIp]!.add(_VoicePacket(seq, pcmData));
+
+    // 启动 jitter 定时器（50ms 后刷新，等待可能的乱序包）
+    _jitterTimers[senderIp]?.cancel();
+    _jitterTimers[senderIp] = Timer(
+      const Duration(milliseconds: 50),
+      () => _flushJitterBuffer(senderIp),
+    );
+
+    // 如果 buffer 积累超过 10 个包，立即刷新
+    if (_jitterBuffer[senderIp]!.length >= 10) {
+      _flushJitterBuffer(senderIp);
+    }
+  }
+
+  /// 刷新 jitter buffer — 按 seq 排序后交给播放器
+  void _flushJitterBuffer(String senderIp) {
+    final buffer = _jitterBuffer[senderIp];
+    if (buffer == null || buffer.isEmpty) return;
+
+    // 按 seq 排序
+    buffer.sort((a, b) => a.seq.compareTo(b.seq));
+
+    // 合并所有 PCM 数据
+    int totalLen = 0;
+    for (final pkt in buffer) {
+      totalLen += pkt.data.length;
+    }
+    final merged = Uint8List(totalLen);
+    int offset = 0;
+    for (final pkt in buffer) {
+      merged.setRange(offset, offset + pkt.data.length, pkt.data);
+      offset += pkt.data.length;
+    }
+
+    buffer.clear();
+    onAudioData?.call(senderIp, merged);
   }
 
   /// 更新对端设备列表
@@ -142,7 +226,6 @@ class VoiceTransceiver {
 
   /// 发送文字消息
   void sendMessage(String senderId, String senderName, String message) {
-    // 截断超长消息
     final truncated = message.length > AppConstants.maxMessageLength
         ? message.substring(0, AppConstants.maxMessageLength)
         : message;
@@ -155,7 +238,6 @@ class VoiceTransceiver {
   void sendAudioData(Uint8List pcmData) {
     if (pcmData.isEmpty) return;
 
-    // 分包发送（每个包不超过 maxPacketSize）
     int offset = 0;
     while (offset < pcmData.length) {
       final remaining = pcmData.length - offset;
@@ -190,6 +272,16 @@ class VoiceTransceiver {
 
   /// 停止服务
   Future<void> stop() async {
+    // 清理 jitter buffer
+    for (final timer in _jitterTimers.values) {
+      timer.cancel();
+    }
+    _jitterTimers.clear();
+    _jitterBuffer.clear();
+    _lastSeq.clear();
+    _lostPackets.clear();
+    _totalPackets.clear();
+
     _socket?.close();
     _socket = null;
   }
@@ -197,4 +289,12 @@ class VoiceTransceiver {
   void dispose() {
     stop();
   }
+}
+
+/// 语音数据包（用于 jitter buffer 排序）
+class _VoicePacket {
+  final int seq;
+  final Uint8List data;
+
+  _VoicePacket(this.seq, this.data);
 }

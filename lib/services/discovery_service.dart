@@ -2,14 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 设备发现服务 — UDP 广播 + 心跳保活 + 信号质量检测
+/// 设备发现服务 — UDP 广播 + 心跳保活 + 信号质量检测 + WiFi 变化检测
 class DiscoveryService {
   RawDatagramSocket? _socket;
   Timer? _heartbeatTimer;
   Timer? _cleanupTimer;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
   final String deviceId;
   String deviceName;
@@ -69,10 +71,68 @@ class DiscoveryService {
         const Duration(seconds: 2),
         (_) => _cleanupDevices(),
       );
+
+      // 监听 WiFi 网络变化
+      _connectivitySub = Connectivity()
+          .onConnectivityChanged
+          .listen(_onConnectivityChanged);
     } catch (e) {
       _log('发现服务启动失败: $e');
       rethrow;
     }
+  }
+
+  /// WiFi 网络变化处理 — 重新获取 IP 并重新发现
+  void _onConnectivityChanged(List<ConnectivityResult> results) {
+    // 检查是否有 WiFi 连接
+    final hasWifi = results.any((r) =>
+        r == ConnectivityResult.wifi || r == ConnectivityResult.ethernet);
+
+    if (!hasWifi) {
+      _log('网络已断开');
+      return;
+    }
+
+    // WiFi 可能发生了变化，重新获取 IP
+    _onWifiChanged();
+  }
+
+  /// WiFi 变化时重新初始化网络
+  Future<void> _onWifiChanged() async {
+    _log('检测到网络变化，重新发现设备...');
+
+    // 清除旧设备列表（旧网络的设备不可达）
+    _devices.clear();
+    _pendingPings.clear();
+    _notifyDevices();
+
+    // 重新获取本机 IP
+    var newIp = await NetworkInfo().getWifiIP() ?? '';
+    if (newIp.isEmpty) {
+      newIp = await _getLocalIpFallback();
+    }
+
+    if (newIp.isNotEmpty && newIp != _localIp) {
+      _localIp = newIp;
+      _log('本机IP已更新: $_localIp');
+
+      // 重新绑定 socket
+      _socket?.close();
+      try {
+        _socket = await RawDatagramSocket.bind(
+          InternetAddress.anyIPv4,
+          AppConstants.discoveryPort,
+          reuseAddress: true,
+        );
+        _socket!.broadcastEnabled = true;
+        _socket!.listen(_handleDatagram);
+      } catch (e) {
+        _log('重新绑定 socket 失败: $e');
+      }
+    }
+
+    // 重新发送发现广播
+    await _sendDiscovery();
   }
 
   /// 处理接收到的 UDP 数据报
@@ -311,6 +371,8 @@ class DiscoveryService {
   /// 停止服务
   Future<void> stop() async {
     await sendLeave();
+    _connectivitySub?.cancel();
+    _connectivitySub = null;
     _heartbeatTimer?.cancel();
     _cleanupTimer?.cancel();
     _socket?.close();

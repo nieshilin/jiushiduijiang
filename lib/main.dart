@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
+import 'package:jiudhiduijiang/l10n/app_localizations.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
 import 'package:jiudhiduijiang/screens/walkie_screen.dart';
@@ -17,6 +19,16 @@ class JiudhiDuiJiangApp extends StatelessWidget {
       title: '就是对讲',
       debugShowCheckedModeBanner: false,
       theme: WalkieTheme.themeData,
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('zh'),
+        Locale('en'),
+      ],
       home: const _AppLoader(),
     );
   }

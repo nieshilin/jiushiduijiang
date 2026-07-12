@@ -101,7 +101,7 @@ class _MessagePanelState extends State<MessagePanel> {
                     size: 18, color: WalkieTheme.accent),
                 const SizedBox(width: 8),
                 const Text(
-                  '频道消息',
+                  '群组消息',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,

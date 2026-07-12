@@ -11,6 +11,8 @@ import 'package:jiudhiduijiang/models/chat_message.dart';
 import 'package:jiudhiduijiang/services/audio_service.dart';
 import 'package:jiudhiduijiang/services/discovery_service.dart';
 import 'package:jiudhiduijiang/services/voice_transceiver.dart';
+import 'package:jiudhiduijiang/services/background_service.dart';
+import 'package:jiudhiduijiang/services/audio_conflict_service.dart';
 
 /// 对讲状态
 enum TalkStatus { idle, transmitting, receiving }
@@ -41,6 +43,20 @@ class WalkieController extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
   int _unreadCount = 0;
 
+  /// 消息持久化 key
+  static const _keyMessages = 'chat_messages';
+  /// 最大保存消息条数
+  static const int _maxStoredMessages = 200;
+
+  // ── 后台服务 & 音频冲突 ──
+  final BackgroundService _bgService = BackgroundService();
+  final AudioConflictService _audioConflict = AudioConflictService();
+  bool _audioConflictPauseEnabled = true;
+  bool _isPausedByConflict = false;
+
+  // ── 权限状态 ──
+  bool _micPermissionDenied = false;
+
   WalkieController({String? deviceId, String? deviceName})
       : _deviceId = deviceId ?? const Uuid().v4(),
         _deviceName = deviceName ?? '对讲机-${DateTime.now().millisecondsSinceEpoch % 10000}' {
@@ -67,6 +83,7 @@ class WalkieController extends ChangeNotifier {
   String get receivingFrom => _receivingFrom;
   String get lastLog => _lastLog;
   bool get isPTTActive => _talkStatus == TalkStatus.transmitting;
+  bool get micPermissionDenied => _micPermissionDenied;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   int get unreadCount => _unreadCount;
@@ -85,6 +102,10 @@ class WalkieController extends ChangeNotifier {
     _connStatus = ConnectionStatus.connecting;
     _log('正在初始化...');
     notifyListeners();
+
+    // 加载历史消息
+    final savedMessages = await loadMessages();
+    _messages.addAll(savedMessages);
 
     // 设置音频回调
     _audio.onAudioData = _onLocalAudioData;
@@ -124,19 +145,127 @@ class WalkieController extends ChangeNotifier {
     _log('就绪 — 本机IP: $_localIp');
     _connStatus = ConnectionStatus.connected;
     notifyListeners();
+
+    // 初始化后台服务和音频冲突检测
+    _initBackgroundAndConflict();
+  }
+
+  /// 初始化后台服务和音频冲突检测
+  Future<void> _initBackgroundAndConflict() async {
+    // 音频冲突检测
+    _audioConflictPauseEnabled = await loadAudioConflictPause();
+    _audioConflict.onConflictStart = _onAudioConflictStart;
+    _audioConflict.onConflictEnd = _onAudioConflictEnd;
+    if (_audioConflictPauseEnabled) {
+      await _audioConflict.start();
+    }
+
+    // 后台服务
+    final bgEnabled = await loadBackgroundEnabled();
+    if (bgEnabled) {
+      await startBackgroundService();
+    }
+  }
+
+  /// 音频冲突开始 — 来电/通话时暂停对讲
+  void _onAudioConflictStart() {
+    if (_talkStatus != TalkStatus.idle) {
+      _audioConflict.saveState(
+        transmitting: _talkStatus == TalkStatus.transmitting,
+        receiving: _talkStatus == TalkStatus.receiving,
+      );
+      // 如果正在通话，强制停止
+      if (_talkStatus == TalkStatus.transmitting) {
+        ptUp();
+      }
+      _isPausedByConflict = true;
+      _log('检测到来电，已暂停对讲');
+      notifyListeners();
+    }
+  }
+
+  /// 音频冲突结束 — 通话结束后恢复
+  void _onAudioConflictEnd() {
+    if (_isPausedByConflict) {
+      _isPausedByConflict = false;
+      _log('通话结束，对讲已恢复');
+      notifyListeners();
+    }
+  }
+
+  /// 设置音频冲突暂停开关
+  Future<void> setAudioConflictPause(bool enabled) async {
+    _audioConflictPauseEnabled = enabled;
+    if (enabled) {
+      await _audioConflict.start();
+    } else {
+      _audioConflict.stop();
+    }
+  }
+
+  /// 启动后台服务
+  Future<void> startBackgroundService() async {
+    final notifEnabled = await loadNotificationEnabled();
+    if (notifEnabled) {
+      await _bgService.requestNotificationPermission();
+    }
+    await _bgService.startService(
+      title: '就是对讲',
+      content: '对讲机运行中 — $onlineCount 台设备在线',
+    );
+  }
+
+  /// 停止后台服务
+  Future<void> stopBackgroundService() async {
+    await _bgService.stopService();
+  }
+
+  /// 更新后台通知内容
+  void updateBackgroundNotification() {
+    if (_bgService.isRunning) {
+      _bgService.updateNotification(
+        title: '就是对讲',
+        content: _talkStatus == TalkStatus.transmitting
+            ? '正在通话...'
+            : _talkStatus == TalkStatus.receiving
+                ? '$_receivingFrom 正在讲话'
+                : '对讲机运行中 — $onlineCount 台设备在线',
+      );
+    }
   }
 
   /// 请求系统权限
   Future<void> _requestPermissions() async {
     if (defaultTargetPlatform == TargetPlatform.android) {
-      await [
+      final results = await [
         Permission.microphone,
-        Permission.location, // Android 需要位置信息才能扫描局域网
+        Permission.location,
+        Permission.phone,
       ].request();
+
+      // 检查麦克风权限是否被拒绝
+      final micStatus = results[Permission.microphone];
+      if (micStatus != null && !micStatus.isGranted) {
+        _micPermissionDenied = true;
+        _log('麦克风权限被拒绝');
+        notifyListeners();
+        return;
+      }
     } else if (defaultTargetPlatform == TargetPlatform.iOS) {
-      await Permission.microphone.request();
+      final micStatus = await Permission.microphone.request();
+      if (!micStatus.isGranted) {
+        _micPermissionDenied = true;
+        _log('麦克风权限被拒绝');
+        notifyListeners();
+        return;
+      }
     }
     // Windows 不需要显式权限请求
+  }
+
+  /// 打开系统应用设置页（引导用户手动授权）
+  Future<void> goToSystemSettings() async {
+    await openAppSettings();
   }
 
   // ── PTT 控制 ──
@@ -222,6 +351,7 @@ class WalkieController extends ChangeNotifier {
     );
     _messages.add(msg);
     _transceiver.sendMessage(_deviceId, _deviceName, trimmed);
+    _saveMessages();
     notifyListeners();
   }
 
@@ -242,6 +372,8 @@ class WalkieController extends ChangeNotifier {
         defaultTargetPlatform == TargetPlatform.iOS) {
       HapticFeedback.lightImpact();
     }
+    updateBackgroundNotification();
+    _saveMessages();
     notifyListeners();
   }
 
@@ -255,6 +387,7 @@ class WalkieController extends ChangeNotifier {
   void clearMessages() {
     _messages.clear();
     _unreadCount = 0;
+    _saveMessages();
     notifyListeners();
   }
 
@@ -319,6 +452,72 @@ class WalkieController extends ChangeNotifier {
     await prefs.setBool(_keySplashEnabled, enabled);
   }
 
+  // ── 后台运行 & 通知持久化 ──
+  static const _keyBackgroundEnabled = 'background_enabled';
+  static const _keyNotificationEnabled = 'notification_enabled';
+  static const _keyAudioConflictPause = 'audio_conflict_pause';
+
+  static Future<bool> loadBackgroundEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyBackgroundEnabled) ?? true;
+  }
+
+  static Future<void> saveBackgroundEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyBackgroundEnabled, enabled);
+  }
+
+  static Future<bool> loadNotificationEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyNotificationEnabled) ?? true;
+  }
+
+  static Future<void> saveNotificationEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNotificationEnabled, enabled);
+  }
+
+  static Future<bool> loadAudioConflictPause() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyAudioConflictPause) ?? true;
+  }
+
+  static Future<void> saveAudioConflictPause(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyAudioConflictPause, enabled);
+  }
+
+  // ── 消息持久化 ──
+
+  /// 保存消息列表到本地存储
+  Future<void> _saveMessages() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // 只保存最近 _maxStoredMessages 条
+      final toSave = _messages.length > _maxStoredMessages
+          ? _messages.sublist(_messages.length - _maxStoredMessages)
+          : _messages;
+      final jsonList = toSave.map((m) => m.toJsonString()).toList();
+      await prefs.setStringList(_keyMessages, jsonList);
+    } catch (_) {
+      // 保存失败静默处理
+    }
+  }
+
+  /// 从本地存储加载历史消息
+  static Future<List<ChatMessage>> loadMessages() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonList = prefs.getStringList(_keyMessages);
+      if (jsonList == null || jsonList.isEmpty) return [];
+      return jsonList
+          .map((str) => ChatMessage.fromJsonString(str))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   void _log(String msg) {
     _lastLog = msg;
     notifyListeners();
@@ -326,6 +525,8 @@ class WalkieController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _audioConflict.dispose();
+    _bgService.stopService();
     _audio.dispose();
     _transceiver.dispose();
     _discovery.dispose();

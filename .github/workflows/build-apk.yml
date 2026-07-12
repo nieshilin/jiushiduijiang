@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Apps
 
 on:
   push:
@@ -6,7 +6,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # ───────────────────────────────────────────
+  # Android APK
+  # ───────────────────────────────────────────
+  build-android:
     name: Build Android APK
     runs-on: ubuntu-latest
 
@@ -39,6 +42,74 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jiudhiduijiang-apk
+          name: jiudhiduijiang-android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+  # ───────────────────────────────────────────
+  # iOS (no code signing — builds app bundle for manual signing)
+  # ───────────────────────────────────────────
+  build-ios:
+    name: Build iOS (No Signing)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jiudhiduijiang-ios
+          path: build/ios/iphoneos/Runner.app
+          retention-days: 30
+
+  # ───────────────────────────────────────────
+  # Windows
+  # ───────────────────────────────────────────
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jiudhiduijiang-windows
+          path: build/windows/x64/runner/Release/
           retention-days: 30

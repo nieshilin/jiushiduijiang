@@ -1,0 +1,112 @@
+{
+  "@@locale": "zh",
+  "appTitle": "就是对讲",
+  "standby": "待机",
+  "youSpeaking": "你正在讲话",
+  "peerSpeaking": "{name} 正在讲话",
+  "@peerSpeaking": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "releaseToEnd": "松开按钮结束通话",
+  "receivingVoice": "接收语音中",
+  "onlineCount": "在线 · {count} 人",
+  "@onlineCount": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "connecting": "正在连接...",
+  "initializing": "正在初始化...",
+  "readyLocalIp": "就绪 — 本机IP: {ip}",
+  "@readyLocalIp": {
+    "placeholders": {
+      "ip": {"type": "String"}
+    }
+  },
+  "initFailed": "初始化失败",
+  "retry": "重试",
+  "settings": "设置",
+  "device": "设备",
+  "audio": "音频",
+  "ui": "界面",
+  "notificationBackground": "通知与后台",
+  "connection": "连接",
+  "messages": "消息",
+  "about": "关于",
+  "deviceName": "设备名称",
+  "deviceId": "设备 ID",
+  "localIp": "本机 IP",
+  "mute": "静音",
+  "splashScreen": "启动页",
+  "backgroundRunning": "后台常驻运行",
+  "systemNotification": "系统通知提醒",
+  "autoPauseOnCall": "来电自动暂停对讲",
+  "onlineDevices": "在线设备",
+  "averageSignal": "平均信号",
+  "messageCount": "消息总数",
+  "clearMessages": "清空消息记录",
+  "aboutApp": "关于本应用",
+  "version": "版本",
+  "author": "作者",
+  "setDeviceName": "设置设备名称",
+  "enterDeviceName": "输入设备名称",
+  "cancel": "取消",
+  "confirm": "确定",
+  "close": "关闭",
+  "volumeControl": "音量调节",
+  "muted": "已静音",
+  "volume": "音量",
+  "exitApp": "退出对讲机",
+  "exitConfirm": "确定要退出吗？退出后将断开与其他设备的连接。",
+  "exit": "退出",
+  "micPermissionDenied": "麦克风权限被拒绝",
+  "micPermissionGuide": "对讲机需要麦克风权限才能进行语音通话。\n\n请前往系统设置 → 应用 → 就是对讲 → 权限，开启麦克风权限后重新打开应用。",
+  "later": "稍后",
+  "goToSettings": "去设置",
+  "signalExcellent": "极好",
+  "signalGood": "良好",
+  "signalFair": "一般",
+  "signalPoor": "较差",
+  "signalNone": "无信号",
+  "lanWalkie": "就是一个局域网对讲机",
+  "callDetected": "检测到来电，已暂停对讲",
+  "callEnded": "通话结束，对讲已恢复",
+  "deviceOffline": "设备离线",
+  "deviceDiscovered": "发现设备: {name}",
+  "@deviceDiscovered": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "deviceTimeout": "设备超时离线: {name}",
+  "@deviceTimeout": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "devicesOnline": "{count} 台设备在线",
+  "@devicesOnline": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "transmitting": "正在通话...",
+  "receivingFrom": "{name} 正在讲话",
+  "@receivingFrom": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "webPreviewMode": "Web 预览模式 — 网络功能不可用",
+  "micPermissionRejected": "麦克风权限被拒绝",
+  "networkDisconnected": "网络已断开",
+  "networkChanged": "检测到网络变化，重新发现设备...",
+  "ipUpdated": "本机IP已更新: {ip}",
+  "@ipUpdated": {
+    "placeholders": {
+      "ip": {"type": "String"}
+    }
+  }
+}

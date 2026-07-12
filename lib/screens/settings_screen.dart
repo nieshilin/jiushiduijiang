@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import 'package:jiudhiduijiang/l10n/app_localizations.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
+import 'package:jiudhiduijiang/screens/about_screen.dart';
 
 /// 设置页面 — 设备名、音量、静音、关于
 class SettingsScreen extends StatefulWidget {
@@ -16,17 +18,34 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _nameController;
   bool _splashEnabled = true;
+  bool _backgroundEnabled = true;
+  bool _notificationEnabled = true;
+  bool _audioConflictPause = true;
 
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.controller.deviceName);
     _loadSplashPref();
+    _loadPrefs();
   }
 
   Future<void> _loadSplashPref() async {
     final enabled = await WalkieController.loadSplashEnabled();
     if (mounted) setState(() => _splashEnabled = enabled);
+  }
+
+  Future<void> _loadPrefs() async {
+    final bg = await WalkieController.loadBackgroundEnabled();
+    final notif = await WalkieController.loadNotificationEnabled();
+    final conflict = await WalkieController.loadAudioConflictPause();
+    if (mounted) {
+      setState(() {
+        _backgroundEnabled = bg;
+        _notificationEnabled = notif;
+        _audioConflictPause = conflict;
+      });
+    }
   }
 
   @override
@@ -37,10 +56,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
     return Scaffold(
       backgroundColor: WalkieTheme.background,
       appBar: AppBar(
-        title: const Text('设置'),
+        title: Text(l.settings),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios, size: 20),
           onPressed: () => Navigator.pop(context),
@@ -52,11 +72,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              _buildSectionHeader('设备'),
+              _buildSectionHeader(l.device),
               _buildCard([
                 _buildTextFieldRow(
                   icon: Icons.badge_outlined,
-                  label: '设备名称',
+                  label: l.deviceName,
                   controller: _nameController,
                   onSave: (val) {
                     if (val.isNotEmpty) {
@@ -67,19 +87,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _buildDivider(),
                 _buildInfoRow(
                   icon: Icons.fingerprint,
-                  label: '设备 ID',
+                  label: l.deviceId,
                   value: widget.controller.deviceId.substring(0, 8).toUpperCase(),
                 ),
                 _buildDivider(),
                 _buildInfoRow(
                   icon: Icons.wifi,
-                  label: '本机 IP',
+                  label: l.localIp,
                   value: widget.controller.localIp,
                 ),
               ]),
               const SizedBox(height: 24),
 
-              _buildSectionHeader('音频'),
+              _buildSectionHeader(l.audio),
               _buildCard([
                 // 音量滑块
                 Padding(
@@ -123,18 +143,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   icon: widget.controller.isMuted
                       ? Icons.volume_off
                       : Icons.volume_up,
-                  label: '静音',
+                  label: l.mute,
                   value: widget.controller.isMuted,
                   onChanged: (val) => widget.controller.setMuted(val),
                 ),
               ]),
               const SizedBox(height: 24),
 
-              _buildSectionHeader('界面'),
+              _buildSectionHeader(l.ui),
               _buildCard([
                 _buildSwitchRow(
                   icon: Icons.image_outlined,
-                  label: '启动页',
+                  label: l.splashScreen,
                   value: _splashEnabled,
                   onChanged: (val) async {
                     await WalkieController.saveSplashEnabled(val);
@@ -144,33 +164,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ]),
               const SizedBox(height: 24),
 
-              _buildSectionHeader('连接'),
+              _buildSectionHeader(l.notificationBackground),
+              _buildCard([
+                _buildSwitchRow(
+                  icon: Icons.all_inclusive,
+                  label: l.backgroundRunning,
+                  value: _backgroundEnabled,
+                  onChanged: (val) async {
+                    await WalkieController.saveBackgroundEnabled(val);
+                    setState(() => _backgroundEnabled = val);
+                    if (val) {
+                      widget.controller.startBackgroundService();
+                    } else {
+                      widget.controller.stopBackgroundService();
+                    }
+                  },
+                ),
+                _buildDivider(),
+                _buildSwitchRow(
+                  icon: Icons.notifications_active_outlined,
+                  label: l.systemNotification,
+                  value: _notificationEnabled,
+                  onChanged: (val) async {
+                    await WalkieController.saveNotificationEnabled(val);
+                    setState(() => _notificationEnabled = val);
+                  },
+                ),
+                _buildDivider(),
+                _buildSwitchRow(
+                  icon: Icons.phone_in_talk_outlined,
+                  label: l.autoPauseOnCall,
+                  value: _audioConflictPause,
+                  onChanged: (val) async {
+                    await WalkieController.saveAudioConflictPause(val);
+                    setState(() => _audioConflictPause = val);
+                    widget.controller.setAudioConflictPause(val);
+                  },
+                ),
+              ]),
+              const SizedBox(height: 24),
+
+              _buildSectionHeader(l.connection),
               _buildCard([
                 _buildInfoRow(
                   icon: Icons.people_alt_outlined,
-                  label: '在线设备',
+                  label: l.onlineDevices,
                   value: '${widget.controller.onlineCount} 台',
                 ),
                 _buildDivider(),
                 _buildInfoRow(
                   icon: Icons.signal_cellular_alt,
-                  label: '平均信号',
-                  value: _qualityText(widget.controller.averageSignalQuality),
+                  label: l.averageSignal,
+                  value: _qualityText(widget.controller.averageSignalQuality, l),
                 ),
               ]),
               const SizedBox(height: 24),
 
-              _buildSectionHeader('消息'),
+              _buildSectionHeader(l.messages),
               _buildCard([
                 _buildInfoRow(
                   icon: Icons.chat_bubble_outline,
-                  label: '消息总数',
+                  label: l.messageCount,
                   value: '${widget.controller.messageCount} 条',
                 ),
                 _buildDivider(),
                 _buildActionRow(
                   icon: Icons.delete_outline,
-                  label: '清空消息记录',
+                  label: l.clearMessages,
                   onTap: () {
                     widget.controller.clearMessages();
                     Navigator.pop(context);
@@ -179,30 +239,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ]),
               const SizedBox(height: 24),
 
-              _buildSectionHeader('关于'),
+              _buildSectionHeader(l.about),
               _buildCard([
-                _buildInfoRow(
+                _buildActionRow(
                   icon: Icons.info_outline,
-                  label: '应用名称',
-                  value: '就是对讲',
+                  label: l.aboutApp,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const AboutScreen(),
+                      ),
+                    );
+                  },
+                  iconColor: WalkieTheme.accent,
+                  textColor: WalkieTheme.textPrimary,
+                  trailing: true,
                 ),
                 _buildDivider(),
                 _buildInfoRow(
                   icon: Icons.tag,
-                  label: '版本',
+                  label: l.version,
                   value: '1.0.0',
                 ),
                 _buildDivider(),
                 _buildInfoRow(
-                  icon: Icons.lan,
-                  label: '协议',
-                  value: 'UDP 广播',
+                  icon: Icons.person_outline,
+                  label: l.author,
+                  value: '小聂',
                 ),
               ]),
               const SizedBox(height: 32),
               Center(
                 child: Text(
-                  '就是一个局域网对讲机',
+                  l.lanWalkie,
                   style: TextStyle(
                     fontSize: 12,
                     color: WalkieTheme.textMuted,
@@ -217,13 +287,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  String _qualityText(int q) {
+  String _qualityText(int q, AppLocalizations l) {
     switch (q) {
-      case 4: return '极好';
-      case 3: return '良好';
-      case 2: return '一般';
-      case 1: return '较差';
-      default: return '无信号';
+      case 4: return l.signalExcellent;
+      case 3: return l.signalGood;
+      case 2: return l.signalFair;
+      case 1: return l.signalPoor;
+      default: return l.signalNone;
     }
   }
 
@@ -291,6 +361,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required IconData icon,
     required String label,
     required VoidCallback onTap,
+    Color iconColor = WalkieTheme.txRed,
+    Color textColor = WalkieTheme.txRed,
+    bool trailing = false,
   }) {
     return InkWell(
       onTap: onTap,
@@ -299,14 +372,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
           children: [
-            Icon(icon, size: 20, color: WalkieTheme.txRed),
+            Icon(icon, size: 20, color: iconColor),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(fontSize: 15, color: WalkieTheme.txRed),
+                style: TextStyle(fontSize: 15, color: textColor),
               ),
             ),
+            if (trailing)
+              const Icon(Icons.chevron_right, size: 20, color: WalkieTheme.textMuted),
           ],
         ),
       ),

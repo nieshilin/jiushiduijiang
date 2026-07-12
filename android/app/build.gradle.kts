@@ -30,6 +30,10 @@ android {
         versionName = flutter.versionName
     }
 
+    dependencies {
+        implementation("androidx.core:core-ktx:1.13.1")
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

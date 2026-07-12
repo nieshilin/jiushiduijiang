@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   cupertino_icons: ^1.0.8
   record: ^6.0.0
   audioplayers: ^6.4.0
@@ -17,6 +19,11 @@ dependencies:
   wakelock_plus: ^1.3.1
   shared_preferences: ^2.5.0
   uuid: ^4.5.1
+  url_launcher: ^6.3.0
+  flutter_local_notifications: ^18.0.0
+  phone_state: ^2.0.1
+  connectivity_plus: ^6.1.0
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:
@@ -25,6 +32,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  generate: true
 
   assets:
     - assets/splash/
