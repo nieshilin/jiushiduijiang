@@ -107,6 +107,29 @@ jobs:
       - name: Analyze code
         run: flutter analyze
 
+      - name: Patch Flutter to use VS 2022 generator
+        shell: pwsh
+        run: |
+          $flutterRoot = ${env:FLUTTER_ROOT} -replace '/', '\'
+          $file = Join-Path $flutterRoot "packages\flutter_tools\lib\src\windows\visual_studio.dart"
+          if (Test-Path $file) {
+            $content = Get-Content $file -Raw
+            $content = $content.Replace('Visual Studio 16 2019', 'Visual Studio 17 2022')
+            Set-Content $file -Value $content -NoNewline
+            Write-Host "Patched visual_studio.dart: VS 2019 -> VS 2022 generator"
+            $snapshot = Join-Path $flutterRoot "bin\cache\flutter_tools.snapshot"
+            if (Test-Path $snapshot) {
+              Remove-Item $snapshot -Force
+              Write-Host "Deleted flutter_tools.snapshot to force recompilation"
+            }
+            $stamp = Join-Path $flutterRoot "bin\cache\flutter_tools.stamp"
+            if (Test-Path $stamp) {
+              Remove-Item $stamp -Force
+            }
+          } else {
+            Write-Host "Warning: visual_studio.dart not found at $file"
+          }
+
       - name: Build Windows
         run: flutter build windows --release
 
