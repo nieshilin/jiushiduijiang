@@ -3,11 +3,22 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:bonsoir/bonsoir.dart';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 设备发现服务 — UDP 广播 + 心跳保活 + 信号质量检测 + WiFi 变化检测
+/// 设备发现服务 — Bonsoir/mDNS 系统托管发现 + UDP unicast 心跳保活
+///
+/// 使用 Bonsoir（基于 Apple Bonjour / Android NSD）进行设备发现，
+/// iOS 不需要 multicast entitlement。
+/// 心跳/ping/pong 通过 UDP unicast 发送到已知 peer。
 class DiscoveryService {
+  // ── Bonsoir ──
+  BonsoirBroadcast? _broadcast;
+  BonsoirDiscovery? _discovery;
+  StreamSubscription<BonsoirDiscoveryEvent>? _discoverySub;
+
+  // ── UDP socket（仅 unicast 心跳/ping/pong）──
   RawDatagramSocket? _socket;
   Timer? _heartbeatTimer;
   Timer? _cleanupTimer;
@@ -17,25 +28,23 @@ class DiscoveryService {
   String deviceName;
   String _localIp = '';
 
-  /// 组播地址 — iOS 不支持 UDP 广播，使用组播进行设备发现
-  final InternetAddress _multicastAddr =
-      InternetAddress(AppConstants.multicastGroup);
-
   final Map<String, Device> _devices = {};
   final StreamController<List<Device>> _deviceStream =
       StreamController<List<Device>>.broadcast();
   final StreamController<String> _logStream =
       StreamController<String>.broadcast();
 
-  // ping/pong 延迟测量：发送 ping 时记录时间戳
-  final Map<String, int> _pendingPings = {}; // senderId -> timestampMs
+  // ping/pong 延迟测量
+  final Map<String, int> _pendingPings = {};
 
   Stream<List<Device>> get deviceStream => _deviceStream.stream;
   Stream<String> get logStream => _logStream.stream;
   String get localIp => _localIp;
   List<Device> get devices => _devices.values.toList();
-  int get onlineCount =>
-      _devices.values.where((d) => d.isOnline).length;
+  int get onlineCount => _devices.values.where((d) => d.isOnline).length;
+
+  /// Bonsoir 服务类型
+  static const String serviceType = '_jiudhi._udp';
 
   DiscoveryService({required this.deviceId, required this.deviceName});
 
@@ -50,7 +59,7 @@ class DiscoveryService {
       }
       _log('本机IP: $_localIp');
 
-      // 绑定 UDP socket
+      // 绑定 UDP socket（仅用于 unicast 心跳）
       _socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         AppConstants.discoveryPort,
@@ -58,25 +67,13 @@ class DiscoveryService {
         reusePort: Platform.isIOS || Platform.isMacOS,
         ttl: 1,
       );
-      // broadcastEnabled 仅在非 iOS 平台设置（iOS 不支持 SO_BROADCAST）
-      if (!Platform.isIOS) {
-        _socket!.broadcastEnabled = true;
-      }
-      // 加入组播组（iOS 必需，其他平台也兼容）
-      try {
-        _socket!.joinMulticast(_multicastAddr);
-        _log('已加入组播组 ${AppConstants.multicastGroup}');
-      } catch (e) {
-        _log('加入组播组失败: $e');
-      }
       _socket!.listen(_handleDatagram);
+      _log('UDP 心跳服务已启动 (端口 ${AppConstants.discoveryPort})');
 
-      _log('发现服务已启动 (端口 ${AppConstants.discoveryPort})');
+      // 启动 Bonsoir 广播和发现
+      await _startBonsoir();
 
-      // 发送初始发现广播
-      await _sendDiscovery();
-
-      // 启动心跳定时器（心跳中附带 ping 时间戳）
+      // 启动心跳定时器
       _heartbeatTimer = Timer.periodic(
         Duration(seconds: AppConstants.heartbeatInterval),
         (_) => _sendHeartbeat(),
@@ -98,82 +95,129 @@ class DiscoveryService {
     }
   }
 
-  /// WiFi 网络变化处理 — 重新获取 IP 并重新发现
-  void _onConnectivityChanged(List<ConnectivityResult> results) {
-    // 检查是否有 WiFi 连接
-    final hasWifi = results.any((r) =>
-        r == ConnectivityResult.wifi || r == ConnectivityResult.ethernet);
+  // ── Bonsoir 广播和发现 ──
 
-    if (!hasWifi) {
-      _log('网络已断开');
+  /// 启动 Bonsoir 广播和发现
+  Future<void> _startBonsoir() async {
+    // 发布服务
+    final service = BonsoirService(
+      name: deviceId,
+      type: serviceType,
+      port: AppConstants.voicePort,
+      attributes: {
+        'id': deviceId,
+        'name': deviceName,
+        'ip': _localIp,
+      },
+    );
+
+    _broadcast = BonsoirBroadcast(service: service);
+    await _broadcast!.initialize();
+    await _broadcast!.start();
+    _log('Bonsoir 广播已启动: $deviceName ($serviceType)');
+
+    // 发现服务
+    _discovery = BonsoirDiscovery(type: serviceType);
+    await _discovery!.initialize();
+    _discoverySub = _discovery!.eventStream!.listen(_onDiscoveryEvent);
+    await _discovery!.start();
+    _log('Bonsoir 发现已启动');
+  }
+
+  /// 停止 Bonsoir 广播和发现
+  Future<void> _stopBonsoir() async {
+    await _discoverySub?.cancel();
+    _discoverySub = null;
+    await _discovery?.stop();
+    _discovery = null;
+    await _broadcast?.stop();
+    _broadcast = null;
+  }
+
+  /// 处理 Bonsoir 发现事件
+  void _onDiscoveryEvent(BonsoirDiscoveryEvent event) {
+    switch (event) {
+      case BonsoirDiscoveryServiceFoundEvent():
+        // 发现服务，尝试解析
+        event.service.resolve(_discovery!.serviceResolver);
+        _log('发现服务: ${event.service.name}');
+        break;
+
+      case BonsoirDiscoveryServiceResolvedEvent():
+        _onServiceResolved(event.service);
+        break;
+
+      case BonsoirDiscoveryServiceLostEvent():
+        final serviceId = event.service.name;
+        if (_devices.containsKey(serviceId)) {
+          _devices.remove(serviceId);
+          _notifyDevices();
+          _log('设备离线: ${event.service.name}');
+        }
+        break;
+
+      case BonsoirDiscoveryServiceUpdatedEvent():
+        _onServiceResolved(event.service);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  /// 服务已解析 — 提取 IP 并添加/更新设备
+  void _onServiceResolved(BonsoirService service) {
+    final id = service.attributes['id'] ?? service.name;
+    if (id == deviceId) return; // 忽略自己
+
+    final name = service.attributes['name'] ?? service.name;
+    final ip = service.attributes['ip'] ?? '';
+
+    InternetAddress address;
+    if (ip.isNotEmpty) {
+      address = InternetAddress(ip);
+    } else if (service.host != null && service.host!.isNotEmpty) {
+      // 从 host 解析 IP
+      try {
+        final lookup = InternetAddress.lookup(service.host!);
+        // 异步解析，先用 host 作为地址
+        address = InternetAddress(service.host!);
+        // 后台解析真实 IP
+        lookup.then((addresses) {
+          if (addresses.isNotEmpty) {
+            _addOrUpdateDevice(id, name, addresses.first);
+          }
+        });
+        return;
+      } catch (_) {
+        address = InternetAddress(service.host ?? '0.0.0.0');
+      }
+    } else {
       return;
     }
 
-    // WiFi 可能发生了变化，重新获取 IP
-    _onWifiChanged();
+    _addOrUpdateDevice(id, name, address);
   }
 
-  /// WiFi 变化时重新初始化网络
-  Future<void> _onWifiChanged() async {
-    _log('检测到网络变化，重新发现设备...');
+  // ── UDP 心跳/ping/pong ──
 
-    // 清除旧设备列表（旧网络的设备不可达）
-    _devices.clear();
-    _pendingPings.clear();
-    _notifyDevices();
-
-    // 重新获取本机 IP
-    var newIp = await NetworkInfo().getWifiIP() ?? '';
-    if (newIp.isEmpty) {
-      newIp = await _getLocalIpFallback();
-    }
-
-    if (newIp.isNotEmpty && newIp != _localIp) {
-      _localIp = newIp;
-      _log('本机IP已更新: $_localIp');
-
-      // 重新绑定 socket
-      _socket?.close();
-      try {
-        _socket = await RawDatagramSocket.bind(
-          InternetAddress.anyIPv4,
-          AppConstants.discoveryPort,
-          reuseAddress: true,
-          reusePort: Platform.isIOS || Platform.isMacOS,
-          ttl: 1,
-        );
-        if (!Platform.isIOS) {
-          _socket!.broadcastEnabled = true;
-        }
-        // 重新加入组播组
-        try {
-          _socket!.joinMulticast(_multicastAddr);
-        } catch (e) {
-          _log('重新加入组播组失败: $e');
-        }
-        _socket!.listen(_handleDatagram);
-      } catch (e) {
-        _log('重新绑定 socket 失败: $e');
-      }
-    }
-
-    // 重新发送发现广播
-    await _sendDiscovery();
-  }
-
-  /// 处理接收到的 UDP 数据报
+  /// 处理接收到的 UDP 数据报（心跳/ping/pong/leave）
   void _handleDatagram(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
 
-    // 循环读取所有可用数据报，防止丢包
     while (true) {
       final datagram = _socket?.receive();
       if (datagram == null) break;
 
-      // 过滤本机消息（IP 过滤，_parseMessage 中还有 deviceId 过滤双保险）
+      // 过滤本机消息
       if (_localIp.isNotEmpty && datagram.address.address == _localIp) continue;
 
-      final message = utf8.decode(datagram.data);
+      String message;
+      try {
+        message = utf8.decode(datagram.data);
+      } catch (_) {
+        continue;
+      }
       _parseMessage(message, datagram.address);
     }
   }
@@ -186,51 +230,33 @@ class DiscoveryService {
     final prefix = parts[0];
     final senderId = parts[1];
 
-    // 过滤本机消息（双保险：IP 过滤 + deviceId 过滤）
     if (senderId == deviceId) return;
 
     switch (prefix) {
-      case AppConstants.prefixDiscovery:
-        // 收到发现请求，回复自己的信息
-        final senderName = parts.length > 2 ? parts[2] : 'Unknown';
-        _addOrUpdateDevice(senderId, senderName, senderAddr);
-        // 向发现者发送 unicast 回复（确保 iOS 可达）
-        _sendResponseTo(senderAddr);
-        break;
-
-      case AppConstants.prefixResponse:
-        final senderName = parts.length > 2 ? parts[2] : 'Unknown';
-        _addOrUpdateDevice(senderId, senderName, senderAddr);
-        break;
-
       case AppConstants.prefixHeartbeat:
-        // 更新最后在线时间和心跳计数
         final device = _devices[senderId];
         if (device != null) {
           device.lastSeen = DateTime.now();
           device.heartbeatCount++;
         } else {
-          // 收到未知设备心跳，添加它并发送发现请求
+          // 收到未知设备心跳，添加它
           final senderName = parts.length > 2 ? parts[2] : 'Unknown';
           _addOrUpdateDevice(senderId, senderName, senderAddr);
-          _sendDiscovery();
         }
-        // 如果心跳中附带 ping 时间戳，回复 pong
+        // 回复 pong
         if (parts.length > 3) {
-          _sendPong(senderId, parts[3]);
+          _sendPongTo(senderAddr, parts[3]);
         }
         break;
 
       case AppConstants.prefixPing:
-        // 收到 ping，回复 pong（原样返回时间戳）
         final pingTs = parts.length > 2 ? parts[2] : '';
         if (pingTs.isNotEmpty) {
-          _sendPongTo(senderId, pingTs);
+          _sendPongTo(senderAddr, pingTs);
         }
         break;
 
       case AppConstants.prefixPong:
-        // 收到 pong，计算延迟
         final pingTs = int.tryParse(parts.length > 2 ? parts[2] : '');
         if (pingTs != null && _pendingPings.containsKey(senderId)) {
           final sentTs = _pendingPings[senderId]!;
@@ -245,20 +271,18 @@ class DiscoveryService {
         break;
 
       case AppConstants.prefixLeave:
-        _devices.remove(senderId);
-        _notifyDevices();
-        _log('设备离线: $senderId');
+        if (_devices.containsKey(senderId)) {
+          _devices.remove(senderId);
+          _notifyDevices();
+          _log('设备离开: $senderId');
+        }
         break;
     }
   }
 
   /// 添加或更新设备
-  void _addOrUpdateDevice(
-    String id,
-    String name,
-    InternetAddress address,
-  ) {
-    if (id == deviceId) return; // 忽略自己
+  void _addOrUpdateDevice(String id, String name, InternetAddress address) {
+    if (id == deviceId) return;
 
     final existing = _devices[id];
     if (existing != null) {
@@ -278,116 +302,90 @@ class DiscoveryService {
     }
   }
 
-  /// 发送发现广播
-  Future<void> _sendDiscovery() async {
-    final msg =
-        '${AppConstants.prefixDiscovery}:$deviceId:$deviceName';
-    final data = utf8.encode(msg);
-    _broadcast(data);
-    // 同时发送 unicast 到子网所有 IP（iOS 可靠后备）
-    _sendUnicastToSubnet(data);
-  }
-
-  /// 公开方法 — 重新发送发现广播
+  /// 公开方法 — 重新发送心跳
   Future<void> rediscover() async {
-    await _sendDiscovery();
+    _sendHeartbeat();
   }
 
-  /// 发送心跳（附带 ping 时间戳用于延迟测量）
-  Future<void> _sendHeartbeat() async {
+  /// 发送心跳（附带 ping 时间戳）— unicast 到所有已知 peer
+  void _sendHeartbeat() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    // 记录 pending ping，等待所有已知设备的 pong
     for (final device in _devices.values) {
       _pendingPings[device.id] = now;
     }
     final msg =
         '${AppConstants.prefixHeartbeat}:$deviceId:$deviceName:$now';
     final data = utf8.encode(msg);
-    _broadcast(data);
+    _sendToAllPeers(data);
   }
 
-  /// 向指定地址发送 unicast 回复
-  void _sendResponseTo(InternetAddress targetAddr) {
-    final msg =
-        '${AppConstants.prefixResponse}:$deviceId:$deviceName';
+  /// 发送 pong 到指定地址
+  void _sendPongTo(InternetAddress targetAddr, String pingTs) {
+    final msg = '${AppConstants.prefixPong}:$deviceId:$pingTs';
     final data = utf8.encode(msg);
     try {
       _socket?.send(data, targetAddr, AppConstants.discoveryPort);
     } catch (_) {}
-    // 也通过 broadcast 发送，让其他设备也能收到
-    _broadcast(data);
-  }
-
-  /// 发送 pong（回复心跳中的 ping）
-  void _sendPong(String targetId, String pingTs) {
-    final msg = '${AppConstants.prefixPong}:$deviceId:$pingTs';
-    final data = utf8.encode(msg);
-    _broadcast(data);
-  }
-
-  /// 发送 pong 到指定地址
-  void _sendPongTo(String targetId, String pingTs) {
-    final msg = '${AppConstants.prefixPong}:$deviceId:$pingTs';
-    final data = utf8.encode(msg);
-    _broadcast(data);
   }
 
   /// 发送离线通知
   Future<void> sendLeave() async {
     final msg = '${AppConstants.prefixLeave}:$deviceId';
     final data = utf8.encode(msg);
-    _broadcast(data);
+    _sendToAllPeers(data);
   }
 
-  /// 发送数据（组播 + 子网广播兼容 + unicast 已知 peer）
-  void _broadcast(List<int> data) {
-    try {
-      // 发送到组播地址（iOS 主要靠此方式发现设备）
-      _socket?.send(data, _multicastAddr, AppConstants.discoveryPort);
-
-      // 非 iOS 平台同时发送子网广播（兼容旧版本/增强覆盖）
-      if (!Platform.isIOS && _localIp.isNotEmpty) {
-        final parts = _localIp.split('.');
-        if (parts.length == 4) {
-          parts[3] = '255';
-          final subnetBroadcast = parts.join('.');
-          _socket?.send(
-              data, InternetAddress(subnetBroadcast), AppConstants.discoveryPort);
-        }
-      }
-
-      // 向所有已知 peer 发送 unicast（确保 iOS 上心跳可达）
-      for (final device in _devices.values) {
-        if (device.isOnline) {
+  /// 向所有已知 peer 发送 unicast 数据
+  void _sendToAllPeers(List<int> data) {
+    for (final device in _devices.values) {
+      if (device.isOnline) {
+        try {
           _socket?.send(data, device.address, AppConstants.discoveryPort);
-        }
-      }
-    } catch (e) {
-      // 发送失败静默处理
-    }
-  }
-
-  /// 向子网内所有 IP 发送 unicast 发现包（iOS 的可靠后备方案）
-  void _sendUnicastToSubnet(List<int> data) {
-    if (_localIp.isEmpty) return;
-    final parts = _localIp.split('.');
-    if (parts.length != 4) return;
-
-    final prefix = '${parts[0]}.${parts[1]}.${parts[2]}.';
-    final selfLast = int.tryParse(parts[3]) ?? -1;
-
-    for (var i = 1; i <= 254; i++) {
-      if (i == selfLast) continue; // 跳过自己
-      try {
-        _socket?.send(data, InternetAddress('$prefix$i'),
-            AppConstants.discoveryPort);
-      } catch (_) {
-        // 忽略单个发送失败
+        } catch (_) {}
       }
     }
   }
 
-  /// 清理超时设备
+  // ── WiFi 变化处理 ──
+
+  void _onConnectivityChanged(List<ConnectivityResult> results) {
+    final hasWifi = results.any((r) =>
+        r == ConnectivityResult.wifi || r == ConnectivityResult.ethernet);
+    if (!hasWifi) {
+      _log('网络已断开');
+      return;
+    }
+    _onWifiChanged();
+  }
+
+  Future<void> _onWifiChanged() async {
+    _log('检测到网络变化，重新发现设备...');
+
+    _devices.clear();
+    _pendingPings.clear();
+    _notifyDevices();
+
+    // 重新获取本机 IP
+    var newIp = await NetworkInfo().getWifiIP() ?? '';
+    if (newIp.isEmpty) {
+      newIp = await _getLocalIpFallback();
+    }
+
+    if (newIp.isNotEmpty) {
+      _localIp = newIp;
+      _log('本机IP已更新: $_localIp');
+    }
+
+    // 重启 Bonsoir（更新 TXT 记录中的 IP）
+    await _stopBonsoir();
+    await _startBonsoir();
+
+    // 发送心跳
+    _sendHeartbeat();
+  }
+
+  // ── 设备清理 ──
+
   void _cleanupDevices() {
     final now = DateTime.now();
     final offlineIds = <String>[];
@@ -407,12 +405,12 @@ class DiscoveryService {
     }
   }
 
-  /// 通知设备列表更新
+  // ── 工具方法 ──
+
   void _notifyDevices() {
     _deviceStream.add(_devices.values.toList());
   }
 
-  /// 获取本机 IP（异步回退方案）
   Future<String> _getLocalIpFallback() async {
     try {
       final interfaces = await NetworkInterface.list(
@@ -433,17 +431,15 @@ class DiscoveryService {
     _logStream.add(msg);
   }
 
-  /// 停止服务
+  // ── 停止/释放 ──
+
   Future<void> stop() async {
     await sendLeave();
     _connectivitySub?.cancel();
     _connectivitySub = null;
     _heartbeatTimer?.cancel();
     _cleanupTimer?.cancel();
-    // 离开组播组
-    try {
-      _socket?.leaveMulticast(_multicastAddr);
-    } catch (_) {}
+    await _stopBonsoir();
     _socket?.close();
     _socket = null;
     _log('发现服务已停止');

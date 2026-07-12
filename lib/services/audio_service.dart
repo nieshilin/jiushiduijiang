@@ -2,12 +2,19 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:record/record.dart';
 
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/utils/wav_utils.dart';
 
-/// 音频录制与播放服务
+// Opus 编解码
+import 'package:opus_dart/opus_dart.dart';
+
+/// 音频录制与播放服务 — Opus 编解码
+///
+/// 录音：PCM16 → 累积 20ms 帧 → Opus 编码 → onAudioData(opusData)
+/// 播放：enqueueAudioData(opusData) → Opus 解码 → PCM16 → WAV → 播放
 class AudioService {
   final AudioRecorder _recorder = AudioRecorder();
   late final AudioPlayer _player;
@@ -17,8 +24,15 @@ class AudioService {
   bool _isMuted = false;
   double _volume = 0.7;
 
-  // 语音数据发送回调
-  void Function(Uint8List pcmData)? onAudioData;
+  // ── Opus 编解码器 ──
+  SimpleOpusEncoder? _opusEncoder;
+  SimpleOpusDecoder? _opusDecoder;
+
+  // 录音 PCM 累积缓冲（等待凑齐一帧再编码）
+  final List<int> _pcmAccumulator = [];
+
+  // 语音数据发送回调 — 输出 Opus 编码后的数据
+  void Function(Uint8List opusData)? onAudioData;
 
   // 播放队列
   final List<Uint8List> _playbackQueue = [];
@@ -53,7 +67,6 @@ class AudioService {
       await _player.setAudioContext(
         AudioContext(
           android: const AudioContextAndroid(
-            // 用 normal 模式走扬声器，inCommunication 会路由到听筒
             isSpeakerphoneOn: true,
             audioMode: AndroidAudioMode.normal,
             audioFocus: AndroidAudioFocus.gain,
@@ -80,12 +93,46 @@ class AudioService {
     return await _recorder.hasPermission();
   }
 
+  /// 确保 Opus 编码器已创建
+  void _ensureEncoder() {
+    if (kIsWeb) return;
+    if (_opusEncoder != null) return;
+    try {
+      _opusEncoder = SimpleOpusEncoder(
+        sampleRate: AppConstants.sampleRate,
+        channels: AppConstants.numChannels,
+        application: Application.voip,
+      );
+      _log('Opus 编码器已创建 (VoIP, ${AppConstants.sampleRate}Hz)');
+    } catch (e) {
+      _log('Opus 编码器创建失败: $e');
+    }
+  }
+
+  /// 确保 Opus 解码器已创建
+  void _ensureDecoder() {
+    if (kIsWeb) return;
+    if (_opusDecoder != null) return;
+    try {
+      _opusDecoder = SimpleOpusDecoder(
+        sampleRate: AppConstants.sampleRate,
+        channels: AppConstants.numChannels,
+      );
+      _log('Opus 解码器已创建 (${AppConstants.sampleRate}Hz)');
+    } catch (e) {
+      _log('Opus 解码器创建失败: $e');
+    }
+  }
+
   /// 开始录音（PTT按下时调用）
   Future<void> startRecording() async {
     if (_isRecording) return;
 
     final hasPermission = await _recorder.hasPermission();
     if (!hasPermission) return;
+
+    _ensureEncoder();
+    _pcmAccumulator.clear();
 
     try {
       final stream = await _recorder.startStream(
@@ -102,15 +149,40 @@ class AudioService {
 
       _isRecording = true;
       _recordSub = stream.listen((Uint8List data) {
-        if (!_isMuted && onAudioData != null) {
-          onAudioData!(data);
-        }
+        _onRecordData(data);
       }, onError: (e) {
         _log('录音错误: $e');
       });
     } catch (e) {
       _isRecording = false;
       rethrow;
+    }
+  }
+
+  /// 处理录音 PCM 数据 — 累积到完整帧后 Opus 编码
+  void _onRecordData(Uint8List data) {
+    if (_isMuted || onAudioData == null) return;
+    if (_opusEncoder == null || _opusEncoder!.destroyed) return;
+
+    _pcmAccumulator.addAll(data);
+
+    // 每凑齐一帧 (640 bytes = 320 samples = 20ms) 编码一次
+    while (_pcmAccumulator.length >= AppConstants.opusFrameBytes) {
+      final frameBytes =
+          Uint8List.fromList(_pcmAccumulator.sublist(0, AppConstants.opusFrameBytes));
+      _pcmAccumulator.removeRange(0, AppConstants.opusFrameBytes);
+
+      // Uint8List → Int16List (PCM16 little-endian)
+      final pcmSamples = frameBytes.buffer.asInt16List();
+
+      try {
+        final opusData = _opusEncoder!.encode(input: pcmSamples);
+        if (opusData.isNotEmpty) {
+          onAudioData!(opusData);
+        }
+      } catch (e) {
+        _log('Opus 编码失败: $e');
+      }
     }
   }
 
@@ -121,19 +193,58 @@ class AudioService {
     await _recordSub?.cancel();
     _recordSub = null;
     await _recorder.stop();
+
+    // 编码剩余不足一帧的 PCM（填充零到完整帧）
+    if (_pcmAccumulator.isNotEmpty &&
+        _opusEncoder != null &&
+        !_opusEncoder!.destroyed &&
+        !_isMuted &&
+        onAudioData != null) {
+      final padded = Uint8List(AppConstants.opusFrameBytes);
+      final remaining = _pcmAccumulator.length;
+      if (remaining <= AppConstants.opusFrameBytes) {
+        padded.setRange(0, remaining, _pcmAccumulator);
+      }
+      _pcmAccumulator.clear();
+
+      try {
+        final pcmSamples = padded.buffer.asInt16List();
+        final opusData = _opusEncoder!.encode(input: pcmSamples);
+        if (opusData.isNotEmpty) {
+          onAudioData!(opusData);
+        }
+      } catch (_) {}
+    }
   }
 
-  /// 接收语音数据并加入播放缓冲
-  void enqueueAudioData(String senderIp, Uint8List pcmData) {
-    if (_isMuted) return;
+  /// 接收 Opus 语音数据并解码播放
+  void enqueueAudioData(String senderIp, Uint8List opusData) {
+    if (_isMuted || opusData.isEmpty) return;
 
+    _ensureDecoder();
+    if (_opusDecoder == null || _opusDecoder!.destroyed) return;
+
+    // Opus → PCM16
+    Int16List pcmSamples;
+    try {
+      pcmSamples = _opusDecoder!.decode(input: opusData);
+    } catch (e) {
+      _log('Opus 解码失败: $e');
+      return;
+    }
+
+    // Int16List → Uint8List (PCM16 little-endian)
+    final pcmBytes = pcmSamples.buffer.asUint8List(
+      pcmSamples.offsetInBytes,
+      pcmSamples.lengthInBytes,
+    );
+
+    // 加入播放缓冲
     final buffer = _pcmBuffers[senderIp] ?? <int>[];
-    buffer.addAll(pcmData);
+    buffer.addAll(pcmBytes);
     _pcmBuffers[senderIp] = buffer;
 
-    // 用定时器统一刷新，不在每次收到数据时都触发
     if (_playbackFlushTimer == null) {
-      // 首次收到数据，立即播放一次（缩短延迟）
       _flushPlaybackBuffer(force: true);
       _playbackFlushTimer = Timer.periodic(
         const Duration(milliseconds: 100),
@@ -148,7 +259,6 @@ class AudioService {
       final buffer = entry.value;
       if (buffer.isEmpty) continue;
 
-      // 强制模式：有数据就播；普通模式：积累到 200ms 再播，减少碎片
       final minBytes = force ? 1 : 6400; // 200ms @ 16kHz 16bit mono
       if (buffer.length < minBytes) continue;
 
@@ -161,7 +271,6 @@ class AudioService {
 
     _tryPlayNext();
 
-    // 如果所有缓冲都已清空，停止定时器
     final allEmpty = _pcmBuffers.values.every((b) => b.isEmpty);
     if (allEmpty && _playbackQueue.isEmpty) {
       _playbackFlushTimer?.cancel();
@@ -192,7 +301,6 @@ class AudioService {
 
   /// 通话结束 — 刷新剩余缓冲
   void onVoiceEndReceived(String senderIp) {
-    // 刷新该发送者的剩余数据
     final buffer = _pcmBuffers[senderIp];
     if (buffer != null && buffer.isNotEmpty) {
       final pcmBytes = Uint8List.fromList(buffer);
@@ -229,12 +337,15 @@ class AudioService {
   Future<void> dispose() async {
     await stopRecording();
     await stopPlayback();
+    _opusEncoder?.destroy();
+    _opusEncoder = null;
+    _opusDecoder?.destroy();
+    _opusDecoder = null;
     _recorder.dispose();
     _player.dispose();
   }
 
   void _log(String msg) {
-    // 调试日志，release 模式可移除
     // ignore: avoid_print
     print('[AudioService] $msg');
   }

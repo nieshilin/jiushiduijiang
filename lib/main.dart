@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
+import 'package:opus_dart/opus_dart.dart';
+import 'package:opus_flutter_new/opus_flutter_new.dart' as opus_flutter;
+
 import 'package:jiudhiduijiang/l10n/app_localizations.dart';
 import 'package:jiudhiduijiang/theme/walkie_theme.dart';
 import 'package:jiudhiduijiang/services/walkie_controller.dart';
 import 'package:jiudhiduijiang/screens/walkie_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // 初始化 Opus 编解码库（加载原生 libopus）
+  initOpus(await opus_flutter.load());
   runApp(const JiudhiDuiJiangApp());
 }
 

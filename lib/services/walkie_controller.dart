@@ -358,15 +358,15 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── 音频回调 ──
 
-  /// 本机录音数据 → 发送给对端
-  void _onLocalAudioData(Uint8List pcmData) {
-    _transceiver.sendAudioData(pcmData);
+  /// 本机 Opus 编码数据 → 发送给对端
+  void _onLocalAudioData(Uint8List opusData) {
+    _transceiver.sendAudioData(opusData);
   }
 
-  /// 收到对端语音数据 → 加入播放队列
-  void _onRemoteAudioData(String senderIp, Uint8List pcmData) {
+  /// 收到对端 Opus 语音数据 → 解码播放
+  void _onRemoteAudioData(String senderIp, Uint8List opusData) {
     if (_talkStatus == TalkStatus.transmitting) return; // 半双工：发送时不接收
-    _audio.enqueueAudioData(senderIp, pcmData);
+    _audio.enqueueAudioData(senderIp, opusData);
   }
 
   /// 收到对端通话开始信号

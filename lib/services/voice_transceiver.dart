@@ -6,13 +6,13 @@ import 'dart:typed_data';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 语音数据传输收发器 — UDP 收发（语音 + 文字消息）
+/// 语音数据传输收发器 — UDP 收发（Opus 语音 + 文字消息）
 class VoiceTransceiver {
   RawDatagramSocket? _socket;
   final List<Device> _peers = [];
 
-  // 收到语音数据回调
-  final void Function(String senderIp, Uint8List pcmData)? onAudioData;
+  // 收到 Opus 语音数据回调
+  final void Function(String senderIp, Uint8List opusData)? onAudioData;
   // 收到通话开始信号回调
   final void Function(String senderIp, String senderName)? onVoiceStart;
   // 收到通话结束信号回调
@@ -78,20 +78,21 @@ class VoiceTransceiver {
   void _processDatagram(Uint8List data, String senderIp) {
     if (data.length < 4) return;
 
-    // 先检查二进制语音数据包
+    // 先检查二进制 Opus 语音数据包
     if (data.length >= 8) {
-      // 检查 magic "JDVD" (little-endian: 0x4A, 0x44, 0x56, 0x44)
-      if (data[0] == 0x4A && data[1] == 0x44 &&
-          data[2] == 0x56 && data[3] == 0x44) {
+      // 检查 magic "JOPE" (JDHI Opus Encoded)
+      // little-endian: J(4A) O(4F) P(50) E(45)
+      if (data[0] == 0x4A && data[1] == 0x4F &&
+          data[2] == 0x50 && data[3] == 0x45) {
         // 解析序列号
         final byteData = data.buffer.asByteData(
           data.offsetInBytes,
           data.lengthInBytes,
         );
         final seq = byteData.getUint32(4, Endian.little);
-        final pcmData = data.sublist(8);
-        if (pcmData.isNotEmpty) {
-          _handleVoicePacket(senderIp, seq, pcmData);
+        final opusData = data.sublist(8);
+        if (opusData.isNotEmpty) {
+          _handleVoicePacket(senderIp, seq, opusData);
         }
         return;
       }
@@ -144,7 +145,7 @@ class VoiceTransceiver {
   }
 
   /// 处理收到的语音包 — 检测丢包 + jitter buffer 排序
-  void _handleVoicePacket(String senderIp, int seq, Uint8List pcmData) {
+  void _handleVoicePacket(String senderIp, int seq, Uint8List audioData) {
     _totalPackets[senderIp] = (_totalPackets[senderIp] ?? 0) + 1;
 
     final lastSeq = _lastSeq[senderIp];
@@ -167,7 +168,7 @@ class VoiceTransceiver {
 
     // 加入 jitter buffer
     _jitterBuffer.putIfAbsent(senderIp, () => []);
-    _jitterBuffer[senderIp]!.add(_VoicePacket(seq, pcmData));
+    _jitterBuffer[senderIp]!.add(_VoicePacket(seq, audioData));
 
     // 启动 jitter 定时器（50ms 后刷新，等待可能的乱序包）
     _jitterTimers[senderIp]?.cancel();
@@ -236,27 +237,28 @@ class VoiceTransceiver {
     _sendToAllPeers(data);
   }
 
-  /// 发送语音 PCM 数据
-  void sendAudioData(Uint8List pcmData) {
-    if (pcmData.isEmpty) return;
+  /// 发送 Opus 语音数据
+  /// 每个 Opus 包封装为一个 UDP 包：[4B magic "JOPE"][4B seq][Opus data]
+  void sendAudioData(Uint8List opusData) {
+    if (opusData.isEmpty) return;
 
+    // Opus 帧通常 20-80 bytes，远小于 maxPacketSize，无需分包
+    // 但保留安全检查：如果数据超长则分包
     int offset = 0;
-    while (offset < pcmData.length) {
-      final remaining = pcmData.length - offset;
-      final chunkSize =
-          remaining > (AppConstants.maxPacketSize - 8)
-              ? (AppConstants.maxPacketSize - 8)
-              : remaining;
+    while (offset < opusData.length) {
+      final remaining = opusData.length - offset;
+      final chunkSize = remaining > (AppConstants.maxPacketSize - 8)
+          ? (AppConstants.maxPacketSize - 8)
+          : remaining;
 
-      // 构建数据包: [4字节magic][4字节seq][PCM数据]
       final packet = Uint8List(8 + chunkSize);
       final byteData = packet.buffer.asByteData();
-      byteData.setUint32(0, 0x4456444A, Endian.little); // "JDVD"
+      // magic "JOPE" little-endian: 0x45504F4A
+      byteData.setUint32(0, AppConstants.opusMagic, Endian.little);
       byteData.setUint32(4, _seqNum++, Endian.little);
-      packet.setRange(8, 8 + chunkSize, pcmData, offset);
+      packet.setRange(8, 8 + chunkSize, opusData, offset);
 
       _sendToAllPeers(packet);
-
       offset += chunkSize;
     }
   }

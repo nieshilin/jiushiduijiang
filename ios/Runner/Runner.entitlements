@@ -2,10 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- 多播网络权限：iOS 14+ 默认禁用 UDP 多播，必须申请并声明该 entitlement -->
-	<key>com.apple.developer.networking.multicast</key>
-	<true/>
-
 	<!-- Wi-Fi 信息权限：获取本机 Wi-Fi IP 地址 -->
 	<key>com.apple.developer.networking.wifi-info</key>
 	<true/>

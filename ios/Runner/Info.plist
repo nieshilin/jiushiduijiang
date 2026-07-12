@@ -64,5 +64,12 @@
 		<string>audio</string>
 		<string>voip</string>
 	</array>
+
+	<!-- ATS 局域网例外：允许本地 UDP 通信不被 ATS 拦截 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

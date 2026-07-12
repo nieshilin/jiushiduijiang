@@ -24,6 +24,9 @@ dependencies:
   phone_state: ^2.0.1
   connectivity_plus: ^6.1.0
   intl: ^0.20.2
+  bonsoir: ^6.0.1
+  opus_dart: ^3.0.1
+  opus_flutter_new: ^3.0.7
 
 dev_dependencies:
   flutter_test:
