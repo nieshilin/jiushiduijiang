@@ -87,6 +87,9 @@ jobs:
     name: Build Windows EXE
     runs-on: windows-latest
 
+    env:
+      CMAKE_GENERATOR: 'Visual Studio 17 2022'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
