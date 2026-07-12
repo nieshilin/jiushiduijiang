@@ -125,9 +125,14 @@ class _WalkieScreenState extends State<WalkieScreen> {
       case TalkStatus.receiving:
         return l.receivingVoice;
       case TalkStatus.idle:
-        return c.connStatus == ConnectionStatus.connected
+        final base = c.connStatus == ConnectionStatus.connected
             ? l.onlineCount(c.onlineCount)
             : l.connecting;
+        // 附加 WebRTC ICE 媒体连接状态
+        if (c.webrtcConnectedCount > 0) {
+          return '$base  |  ICE: ${c.webrtcConnectedCount}';
+        }
+        return base;
     }
   }
 

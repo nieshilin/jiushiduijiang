@@ -2,6 +2,8 @@
 
     <!-- 麦克风录音权限 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- WebRTC 音频路由控制（扬声器/听筒切换） -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 网络通信 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

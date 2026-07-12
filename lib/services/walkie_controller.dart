@@ -45,6 +45,7 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
   bool _isMuted = false;
   String _receivingFrom = '';
   String _lastLog = '';
+  int _webrtcConnectedCount = 0;
 
   // ── 消息列表 ──
   final List<ChatMessage> _messages = [];
@@ -97,6 +98,7 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
   String get lastLog => _lastLog;
   bool get isPTTActive => _talkStatus == TalkStatus.transmitting;
   bool get micPermissionDenied => _micPermissionDenied;
+  int get webrtcConnectedCount => _webrtcConnectedCount;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   int get unreadCount => _unreadCount;
@@ -149,6 +151,12 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
       // 远程音频到达，可触发 UI 反馈
     };
 
+    // WebRTC 媒体连接数变化 → 更新 UI
+    _webrtc.onConnectionCountChanged = (count) {
+      _webrtcConnectedCount = count;
+      notifyListeners();
+    };
+
     // 启动语音收发（用于信令 + 文字消息 + 通话信号）
     await _transceiver.start(_localIp);
 
@@ -178,6 +186,15 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   /// 同步设备列表到 WebRTC 连接
   void _syncPeersWithWebRTC(List<Device> currentDevices) {
+    // 获取当前在线设备 ID 列表（排除本机）
+    final onlineIds = currentDevices
+        .where((d) => d.isOnline && d.address.address != _localIp)
+        .map((d) => d.id)
+        .toList();
+
+    // 清理已离线的僵尸 WebRTC 连接
+    _webrtc.syncFromDeviceList(onlineIds);
+
     // 自动为新上线设备建立 WebRTC 连接
     for (final device in currentDevices) {
       if (device.isOnline && device.address.address != _localIp) {
