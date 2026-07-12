@@ -6,39 +6,40 @@ import 'dart:typed_data';
 import 'package:jiudhiduijiang/utils/constants.dart';
 import 'package:jiudhiduijiang/models/device.dart';
 
-/// 语音数据传输收发器 — UDP 收发（Opus 语音 + 文字消息）
+/// 语音传输收发器 — UDP 收发（WebRTC 信令 + 文字消息 + 通话开始/结束）
+///
+/// 音频编码/传输/解码由 WebRTC 引擎内部处理，不再经过本类。
+/// 本类仅负责：
+///   - UDP socket 管理
+///   - WebRTC 信令消息转发（SDP/ICE）
+///   - 通话开始/结束信号
+///   - 文字消息收发
 class VoiceTransceiver {
   RawDatagramSocket? _socket;
   final List<Device> _peers = [];
 
-  // 收到 Opus 语音数据回调
-  final void Function(String senderIp, Uint8List opusData)? onAudioData;
-  // 收到通话开始信号回调
+  // ── 通话信号回调 ──
   final void Function(String senderIp, String senderName)? onVoiceStart;
-  // 收到通话结束信号回调
   final void Function(String senderIp)? onVoiceEnd;
-  // 收到文字消息回调
+
+  // ── 文字消息回调 ──
   final void Function(String senderIp, String senderId, String senderName, String message)? onMessage;
-  // 丢包统计回调
-  final void Function(String senderIp, int lostPackets, int totalPackets)? onPacketLoss;
 
-  int _seqNum = 0;
-
-  // ── 每个发送者的序列号追踪 ──
-  final Map<String, int> _lastSeq = {};       // senderIp -> 上次收到的 seq
-  final Map<String, int> _lostPackets = {};   // senderIp -> 累计丢包数
-  final Map<String, int> _totalPackets = {};  // senderIp -> 累计收到的包数
-  // jitter buffer: 每个发送者的待排序包队列
-  final Map<String, List<_VoicePacket>> _jitterBuffer = {};
-  // 每个发送者的 jitter 刷新定时器
-  final Map<String, Timer> _jitterTimers = {};
+  // ── WebRTC 信令回调 ──
+  /// 收到 SDP (offer/answer)
+  final void Function(String senderIp, String deviceId, String sdp, bool isOffer)? onWrtcSdp;
+  /// 收到 ICE candidate
+  final void Function(String senderIp, String deviceId, String candidate, String sdpMid, int sdpMLineIndex)? onWrtcIce;
+  /// 收到断开连接请求
+  final void Function(String senderIp, String deviceId)? onWrtcBye;
 
   VoiceTransceiver({
-    this.onAudioData,
     this.onVoiceStart,
     this.onVoiceEnd,
     this.onMessage,
-    this.onPacketLoss,
+    this.onWrtcSdp,
+    this.onWrtcIce,
+    this.onWrtcBye,
   });
 
   /// 当前对端数量
@@ -64,7 +65,6 @@ class VoiceTransceiver {
   void _handleDatagram(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
 
-    // 循环读取所有可用数据报，防止丢包
     while (true) {
       final datagram = _socket?.receive();
       if (datagram == null) break;
@@ -79,29 +79,7 @@ class VoiceTransceiver {
 
   /// 解析单个数据报
   void _processDatagram(Uint8List data, String senderIp) {
-    if (data.length < 4) return;
-
-    // 先检查二进制 Opus 语音数据包
-    if (data.length >= 8) {
-      // 检查 magic "JOPE" (JDHI Opus Encoded)
-      // little-endian: J(4A) O(4F) P(50) E(45)
-      if (data[0] == 0x4A && data[1] == 0x4F &&
-          data[2] == 0x50 && data[3] == 0x45) {
-        // 解析序列号
-        final byteData = data.buffer.asByteData(
-          data.offsetInBytes,
-          data.lengthInBytes,
-        );
-        final seq = byteData.getUint32(4, Endian.little);
-        final opusData = data.sublist(8);
-        if (opusData.isNotEmpty) {
-          _handleVoicePacket(senderIp, seq, opusData);
-        }
-        return;
-      }
-    }
-
-    // 非二进制包，尝试解析为文本控制消息
+    // 所有数据现在都是文本协议（WebRTC 音频走自己的 SRTP 通道）
     String asString;
     try {
       asString = utf8.decode(data, allowMalformed: true);
@@ -109,26 +87,21 @@ class VoiceTransceiver {
       return;
     }
 
+    // ── 通话开始 ──
     if (asString.startsWith(AppConstants.prefixVoiceStart)) {
       final parts = asString.split(':');
       final senderName = parts.length > 2 ? parts[2] : 'Unknown';
-      // 通话开始时重置该发送者的 seq 追踪
-      _lastSeq.remove(senderIp);
-      _lostPackets.remove(senderIp);
-      _totalPackets.remove(senderIp);
       onVoiceStart?.call(senderIp, senderName);
       return;
     }
 
+    // ── 通话结束 ──
     if (asString.startsWith(AppConstants.prefixVoiceEnd)) {
-      // 通话结束时刷新 jitter buffer
-      _flushJitterBuffer(senderIp);
-      _jitterTimers[senderIp]?.cancel();
-      _jitterTimers.remove(senderIp);
       onVoiceEnd?.call(senderIp);
       return;
     }
 
+    // ── 文字消息 ──
     if (asString.startsWith(AppConstants.prefixMessage)) {
       final firstColon = asString.indexOf(':');
       final afterPrefix = asString.substring(firstColon + 1);
@@ -145,64 +118,75 @@ class VoiceTransceiver {
       }
       return;
     }
-  }
 
-  /// 处理收到的语音包 — 检测丢包 + jitter buffer 排序
-  void _handleVoicePacket(String senderIp, int seq, Uint8List audioData) {
-    _totalPackets[senderIp] = (_totalPackets[senderIp] ?? 0) + 1;
+    // ── WebRTC SDP ──
+    if (asString.startsWith(AppConstants.prefixWrtcSdp)) {
+      final parts = asString.split(':');
+      // JDHI_WTC:deviceId:type:base64Sdp
+      if (parts.length < 4) return;
+      final deviceId = parts[1];
+      final type = parts[2]; // "offer" or "answer"
+      final sdpB64 = parts.sublist(3).join(':'); // SDP 可能包含 ':'
+      try {
+        final sdp = utf8.decode(base64.decode(sdpB64));
+        onWrtcSdp?.call(senderIp, deviceId, sdp, type == 'offer');
+      } catch (_) {}
+      return;
+    }
 
-    final lastSeq = _lastSeq[senderIp];
-    if (lastSeq != null) {
-      // 检测丢包：期望 seq = lastSeq + 1
-      final expected = lastSeq + 1;
-      if (seq > expected) {
-        // 有丢包
-        final lost = seq - expected;
-        _lostPackets[senderIp] = (_lostPackets[senderIp] ?? 0) + lost;
-        onPacketLoss?.call(
-          senderIp,
-          _lostPackets[senderIp]!,
-          _totalPackets[senderIp]!,
-        );
+    // ── WebRTC ICE candidate ──
+    if (asString.startsWith(AppConstants.prefixWrtcIce)) {
+      final parts = asString.split(':');
+      // JDHI_WTI:deviceId:candidateB64:sdpMidB64:sdpMLineIndex
+      if (parts.length < 5) return;
+      final deviceId = parts[1];
+      try {
+        final candidate = utf8.decode(base64.decode(parts[2]));
+        final sdpMid = utf8.decode(base64.decode(parts[3]));
+        final sdpMLineIndex = int.tryParse(parts[4]) ?? 0;
+        onWrtcIce?.call(senderIp, deviceId, candidate, sdpMid, sdpMLineIndex);
+      } catch (_) {}
+      return;
+    }
+
+    // ── WebRTC Bye ──
+    if (asString.startsWith(AppConstants.prefixWrtcBye)) {
+      final parts = asString.split(':');
+      if (parts.length >= 2) {
+        onWrtcBye?.call(senderIp, parts[1]);
       }
-      // seq < lastSeq 说明是乱序/重复包，忽略丢包检测
-    }
-    _lastSeq[senderIp] = seq;
-
-    // 加入 jitter buffer
-    _jitterBuffer.putIfAbsent(senderIp, () => []);
-    _jitterBuffer[senderIp]!.add(_VoicePacket(seq, audioData));
-
-    // 启动 jitter 定时器（50ms 后刷新，等待可能的乱序包）
-    _jitterTimers[senderIp]?.cancel();
-    _jitterTimers[senderIp] = Timer(
-      const Duration(milliseconds: 50),
-      () => _flushJitterBuffer(senderIp),
-    );
-
-    // 如果 buffer 积累超过 5 个包，立即刷新
-    if (_jitterBuffer[senderIp]!.length >= 5) {
-      _flushJitterBuffer(senderIp);
+      return;
     }
   }
 
-  /// 刷新 jitter buffer — 按 seq 排序后逐帧交给播放器
-  ///
-  /// 注意：Opus 帧是变长的，不能合并成一个 blob 传给解码器，
-  /// 否则 decode() 只会解码第一帧，其余数据全部丢失。
-  void _flushJitterBuffer(String senderIp) {
-    final buffer = _jitterBuffer[senderIp];
-    if (buffer == null || buffer.isEmpty) return;
+  // ── 发送方法 ──
 
-    // 按 seq 排序
-    buffer.sort((a, b) => a.seq.compareTo(b.seq));
+  /// 发送原始信令消息（给指定设备）
+  void sendSignalingTo(String deviceId, String message) {
+    final data = utf8.encode(message);
+    _sendToDevice(deviceId, data);
+  }
 
-    // 逐帧传递（不合并！每个 Opus 帧独立解码）
-    for (final pkt in buffer) {
-      onAudioData?.call(senderIp, pkt.data);
-    }
+  /// 发送通话开始信号
+  void sendVoiceStart(String senderId, String senderName) {
+    final msg = '${AppConstants.prefixVoiceStart}:$senderId:$senderName';
+    _sendToAllPeers(utf8.encode(msg));
+  }
 
-    buffer.clear();
+  /// 发送通话结束信号
+  void sendVoiceEnd(String senderId) {
+    final msg = '${AppConstants.prefixVoiceEnd}:$senderId';
+    _sendToAllPeers(utf8.encode(msg));
+  }
+
+  /// 发送文字消息
+  void sendMessage(String senderId, String senderName, String message) {
+    final truncated = message.length > AppConstants.maxMessageLength
+        ? message.substring(0, AppConstants.maxMessageLength)
+        : message;
+    final msg =
+        '${AppConstants.prefixMessage}:$senderId:$senderName:$truncated';
+    _sendToAllPeers(utf8.encode(msg));
   }
 
   /// 更新对端设备列表
@@ -211,55 +195,16 @@ class VoiceTransceiver {
     _peers.addAll(peers.where((d) => d.address.address != localIp));
   }
 
-  /// 发送通话开始信号
-  void sendVoiceStart(String senderId, String senderName) {
-    final msg = '${AppConstants.prefixVoiceStart}:$senderId:$senderName';
-    final data = utf8.encode(msg);
-    _sendToAllPeers(data);
-  }
-
-  /// 发送通话结束信号
-  void sendVoiceEnd(String senderId) {
-    final msg = '${AppConstants.prefixVoiceEnd}:$senderId';
-    final data = utf8.encode(msg);
-    _sendToAllPeers(data);
-  }
-
-  /// 发送文字消息
-  void sendMessage(String senderId, String senderName, String message) {
-    final truncated = message.length > AppConstants.maxMessageLength
-        ? message.substring(0, AppConstants.maxMessageLength)
-        : message;
-    final msg = '${AppConstants.prefixMessage}:$senderId:$senderName:$truncated';
-    final data = utf8.encode(msg);
-    _sendToAllPeers(data);
-  }
-
-  /// 发送 Opus 语音数据
-  /// 每个 Opus 包封装为一个 UDP 包：[4B magic "JOPE"][4B seq][Opus data]
-  void sendAudioData(Uint8List opusData) {
-    if (opusData.isEmpty) return;
-    if (_peers.isEmpty) return; // 无对端，不发送
-
-    // Opus 帧通常 20-80 bytes，远小于 maxPacketSize，无需分包
-    // 但保留安全检查：如果数据超长则分包
-    int offset = 0;
-    while (offset < opusData.length) {
-      final remaining = opusData.length - offset;
-      final chunkSize = remaining > (AppConstants.maxPacketSize - 8)
-          ? (AppConstants.maxPacketSize - 8)
-          : remaining;
-
-      final packet = Uint8List(8 + chunkSize);
-      final byteData = packet.buffer.asByteData();
-      // magic "JOPE" little-endian: 0x45504F4A
-      byteData.setUint32(0, AppConstants.opusMagic, Endian.little);
-      byteData.setUint32(4, _seqNum++, Endian.little);
-      packet.setRange(8, 8 + chunkSize, opusData, offset);
-
-      _sendToAllPeers(packet);
-      offset += chunkSize;
-    }
+  /// 向指定设备发送数据
+  void _sendToDevice(String deviceId, List<int> data) {
+    final peer = _peers.cast<Device?>().firstWhere(
+      (d) => d?.id == deviceId,
+      orElse: () => null,
+    );
+    if (peer == null) return;
+    try {
+      _socket?.send(data, peer.address, peer.voicePort);
+    } catch (_) {}
   }
 
   /// 向所有对端发送数据
@@ -267,24 +212,12 @@ class VoiceTransceiver {
     for (final peer in _peers) {
       try {
         _socket?.send(data, peer.address, peer.voicePort);
-      } catch (_) {
-        // 发送失败静默处理
-      }
+      } catch (_) {}
     }
   }
 
   /// 停止服务
   Future<void> stop() async {
-    // 清理 jitter buffer
-    for (final timer in _jitterTimers.values) {
-      timer.cancel();
-    }
-    _jitterTimers.clear();
-    _jitterBuffer.clear();
-    _lastSeq.clear();
-    _lostPackets.clear();
-    _totalPackets.clear();
-
     _socket?.close();
     _socket = null;
   }
@@ -292,12 +225,4 @@ class VoiceTransceiver {
   void dispose() {
     stop();
   }
-}
-
-/// 语音数据包（用于 jitter buffer 排序）
-class _VoicePacket {
-  final int seq;
-  final Uint8List data;
-
-  _VoicePacket(this.seq, this.data);
 }

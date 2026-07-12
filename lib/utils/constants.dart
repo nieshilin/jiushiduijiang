@@ -43,36 +43,23 @@ class AppConstants {
   /// 音频位深
   static const int bitsPerSample = 16;
 
-  /// UDP 单包最大音频数据长度
+  /// UDP 单包最大数据长度
   static const int maxPacketSize = 1400;
-
-  // ── Opus 编解码参数 ──
-  /// Opus 帧长（毫秒）
-  static const int opusFrameTimeMs = 20;
-
-  /// Opus 每帧采样数 = sampleRate * frameTimeMs / 1000
-  static const int opusFrameSize = 320; // 16000 * 0.02
-
-  /// Opus 每帧 PCM 字节数 = frameSize * 2 (16bit)
-  static const int opusFrameBytes = 640; // 320 * 2
-
-  /// Opus 编码比特率
-  static const int opusBitrate = 24000; // 24kbps, VoIP 质量与带宽平衡
-
-  /// Opus 语音包 magic "JOPE" (JDHI Opus Encoded)
-  static const int opusMagic = 0x45504F4A; // little-endian: J(4A) O(4F) P(50) E(45)
 
   /// 协议消息前缀
   static const String prefixDiscovery = 'JDHI_DISC';
   static const String prefixResponse = 'JDHI_RESP';
   static const String prefixHeartbeat = 'JDHI_HB';
   static const String prefixVoiceStart = 'JDHI_VS';
-  static const String prefixVoiceData = 'JDHI_VD';
   static const String prefixVoiceEnd = 'JDHI_VE';
   static const String prefixLeave = 'JDHI_LEAVE';
   static const String prefixMessage = 'JDHI_MSG';
   static const String prefixPing = 'JDHI_PNG';
   static const String prefixPong = 'JDHI_POG';
+  // WebRTC 信令消息类型
+  static const String prefixWrtcSdp = 'JDHI_WTC';   // SDP offer/answer
+  static const String prefixWrtcIce = 'JDHI_WTI';   // ICE candidate
+  static const String prefixWrtcBye = 'JDHI_WTB';   // 关闭连接
 
   /// 文字消息最大长度
   static const int maxMessageLength = 500;

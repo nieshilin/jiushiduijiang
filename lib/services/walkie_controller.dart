@@ -12,6 +12,7 @@ import 'package:jiudhiduijiang/models/chat_message.dart';
 import 'package:jiudhiduijiang/services/audio_service.dart';
 import 'package:jiudhiduijiang/services/discovery_service.dart';
 import 'package:jiudhiduijiang/services/voice_transceiver.dart';
+import 'package:jiudhiduijiang/services/webrtc_service.dart';
 import 'package:jiudhiduijiang/services/background_service.dart';
 import 'package:jiudhiduijiang/services/audio_conflict_service.dart';
 
@@ -22,9 +23,14 @@ enum TalkStatus { idle, transmitting, receiving }
 enum ConnectionStatus { disconnected, connecting, connected }
 
 /// 对讲机核心控制器 — 统一管理所有服务与状态
+///
+/// 音频路径：Mic → WebRTC(getUserMedia) → Opus(内置) → SRTP → ... → WAV(无)
+/// WebRTC 引擎内部处理音频采集、编码、传输、jitter buffer、解码和播放，
+/// walkie_controller 仅负责控制流和信令协调。
 class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
   late final DiscoveryService _discovery;
   late final VoiceTransceiver _transceiver;
+  late final WebRTCService _webrtc;
   late final AudioService _audio;
 
   final String _deviceId;
@@ -65,12 +71,15 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
       : _deviceId = deviceId ?? const Uuid().v4(),
         _deviceName = deviceName ?? '对讲机-${DateTime.now().millisecondsSinceEpoch % 10000}' {
     _audio = AudioService();
+    _webrtc = WebRTCService();
     _discovery = DiscoveryService(deviceId: _deviceId, deviceName: _deviceName);
     _transceiver = VoiceTransceiver(
-      onAudioData: _onRemoteAudioData,
       onVoiceStart: _onRemoteVoiceStart,
       onVoiceEnd: _onRemoteVoiceEnd,
       onMessage: _onRemoteMessage,
+      onWrtcSdp: _onWrtcSdp,
+      onWrtcIce: _onWrtcIce,
+      onWrtcBye: _onWrtcBye,
     );
   }
 
@@ -97,13 +106,13 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
   int get averageSignalQuality {
     final online = _devices.where((d) => d.isOnline).toList();
     if (online.isEmpty) return 0;
-    final avg = online.map((d) => d.signalQuality).reduce((a, b) => a + b) / online.length;
+    final avg =
+        online.map((d) => d.signalQuality).reduce((a, b) => a + b) / online.length;
     return avg.round();
   }
 
   /// 初始化
   Future<void> init() async {
-    // 注册生命周期观察者（监听 App 前后台切换）
     WidgetsBinding.instance.addObserver(this);
 
     _connStatus = ConnectionStatus.connecting;
@@ -114,12 +123,9 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     final savedMessages = await loadMessages();
     _messages.addAll(savedMessages);
 
-    // 设置音频回调
-    _audio.onAudioData = _onLocalAudioData;
     await _audio.setVolume(_volume);
 
     if (kIsWeb) {
-      // Web 端不支持 dart:io 的 UDP 网络功能，仅初始化 UI
       _localIp = 'Web';
       _log('Web 预览模式 — 网络功能不可用');
       _connStatus = ConnectionStatus.connected;
@@ -130,15 +136,29 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     // 请求权限
     await _requestPermissions();
 
-    // 启动语音收发
+    // 初始化 WebRTC（麦克风采集 + 编解码引擎）
+    await _webrtc.init(deviceId: _deviceId, deviceName: _deviceName);
+
+    // 信令转发：WebRTC → UDP
+    _webrtc.onSendSignaling = (deviceId, message) {
+      _transceiver.sendSignalingTo(deviceId, message);
+    };
+
+    // WebRTC 远程音频事件（可选，主要靠 voice_start/voice_end 协调状态）
+    _webrtc.onRemoteAudioActive = (deviceId) {
+      // 远程音频到达，可触发 UI 反馈
+    };
+
+    // 启动语音收发（用于信令 + 文字消息 + 通话信号）
     await _transceiver.start(_localIp);
 
     // 启动设备发现
     await _discovery.start();
     _localIp = _discovery.localIp;
 
-    // 监听设备列表
+    // 监听设备列表 → WebRTC 建立/断开连接
     _discovery.deviceStream.listen((devices) {
+      _syncPeersWithWebRTC(devices);
       _devices = devices;
       _transceiver.updatePeers(devices, _localIp);
       _connStatus = ConnectionStatus.connected;
@@ -153,13 +173,21 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     _connStatus = ConnectionStatus.connected;
     notifyListeners();
 
-    // 初始化后台服务和音频冲突检测
     _initBackgroundAndConflict();
+  }
+
+  /// 同步设备列表到 WebRTC 连接
+  void _syncPeersWithWebRTC(List<Device> currentDevices) {
+    // 自动为新上线设备建立 WebRTC 连接
+    for (final device in currentDevices) {
+      if (device.isOnline && device.address.address != _localIp) {
+        _webrtc.onDeviceOnline(device.id, device.name);
+      }
+    }
   }
 
   /// 初始化后台服务和音频冲突检测
   Future<void> _initBackgroundAndConflict() async {
-    // 音频冲突检测
     _audioConflictPauseEnabled = await loadAudioConflictPause();
     _audioConflict.onConflictStart = _onAudioConflictStart;
     _audioConflict.onConflictEnd = _onAudioConflictEnd;
@@ -167,21 +195,18 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
       await _audioConflict.start();
     }
 
-    // 后台服务
     final bgEnabled = await loadBackgroundEnabled();
     if (bgEnabled) {
       await startBackgroundService();
     }
   }
 
-  /// 音频冲突开始 — 来电/通话时暂停对讲
   void _onAudioConflictStart() {
     if (_talkStatus != TalkStatus.idle) {
       _audioConflict.saveState(
         transmitting: _talkStatus == TalkStatus.transmitting,
         receiving: _talkStatus == TalkStatus.receiving,
       );
-      // 如果正在通话，强制停止
       if (_talkStatus == TalkStatus.transmitting) {
         ptUp();
       }
@@ -191,7 +216,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// 音频冲突结束 — 通话结束后恢复
   void _onAudioConflictEnd() {
     if (_isPausedByConflict) {
       _isPausedByConflict = false;
@@ -200,7 +224,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// 设置音频冲突暂停开关
   Future<void> setAudioConflictPause(bool enabled) async {
     _audioConflictPauseEnabled = enabled;
     if (enabled) {
@@ -210,7 +233,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// 启动后台服务
   Future<void> startBackgroundService() async {
     final notifEnabled = await loadNotificationEnabled();
     if (notifEnabled) {
@@ -222,12 +244,10 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
-  /// 停止后台服务
   Future<void> stopBackgroundService() async {
     await _bgService.stopService();
   }
 
-  /// 更新后台通知内容
   void updateBackgroundNotification() {
     if (_bgService.isRunning) {
       _bgService.updateNotification(
@@ -241,7 +261,8 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// 请求系统权限
+  // ── 权限 ──
+
   Future<void> _requestPermissions() async {
     if (kIsWeb) return;
 
@@ -251,14 +272,12 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
         Permission.location,
         Permission.phone,
       ].request();
-
       final micStatus = results[Permission.microphone];
       _setMicPermissionDenied(!(micStatus?.isGranted ?? false));
       return;
     }
 
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      // iOS: 先查当前状态，避免已授权用户误触发请求
       final currentStatus = await Permission.microphone.status;
       _log('麦克风权限状态: $currentStatus');
 
@@ -268,22 +287,17 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
       }
 
       if (currentStatus.isRestricted || currentStatus.isPermanentlyDenied) {
-        // 受限或永久拒绝：直接标记为拒绝，不再弹系统弹窗
         _setMicPermissionDenied(true);
         return;
       }
 
-      // 尚未请求，尝试弹系统授权弹窗
       final requestedStatus = await Permission.microphone.request();
       _log('麦克风请求结果: $requestedStatus');
       _setMicPermissionDenied(!requestedStatus.isGranted);
       return;
     }
-
-    // Windows 不需要显式权限请求
   }
 
-  /// 统一设置麦克风权限拒绝标志，仅在变化时通知 UI
   void _setMicPermissionDenied(bool denied) {
     if (_micPermissionDenied == denied) return;
     _micPermissionDenied = denied;
@@ -295,7 +309,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  /// App 生命周期变化 — 从设置页返回时重新检查权限
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -303,20 +316,15 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// 重新检查麦克风权限（从设置页返回后调用）
   Future<void> _recheckMicPermission() async {
     final status = await Permission.microphone.status;
     _log('App 恢复前台，麦克风权限状态: $status');
-
     _setMicPermissionDenied(!status.isGranted);
-
     if (_micPermissionDenied) {
-      // 权限仍被拒绝，通知 UI 重新引导用户
       onPermissionRecheck?.call();
     }
   }
 
-  /// 打开系统应用设置页（引导用户手动授权）
   Future<void> goToSystemSettings() async {
     await openAppSettings();
   }
@@ -330,7 +338,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     _talkStatus = TalkStatus.transmitting;
     notifyListeners();
 
-    // 震动反馈
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
       HapticFeedback.heavyImpact();
@@ -339,22 +346,18 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     // 通知对端通话开始
     _transceiver.sendVoiceStart(_deviceId, _deviceName);
 
-    // 开始录音
-    try {
-      await _audio.startRecording();
-      _log('正在讲话... (对端 ${_transceiver.peerCount} 台)');
-    } catch (e) {
-      _log('❌ 录音启动失败: $e');
-      _talkStatus = TalkStatus.idle;
-      notifyListeners();
-    }
+    // 启用 WebRTC 音频轨道 → 开始发送音频
+    _webrtc.startSending();
+
+    _log('正在讲话... (对端 ${_webrtc.peerCount} 台)');
   }
 
   /// PTT 松开 — 结束通话
   Future<void> ptUp() async {
     if (_talkStatus != TalkStatus.transmitting) return;
 
-    await _audio.stopRecording();
+    // 禁用 WebRTC 音频轨道 → 停止发送音频
+    _webrtc.stopSending();
 
     // 通知对端通话结束
     _transceiver.sendVoiceEnd(_deviceId);
@@ -363,32 +366,43 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  // ── 音频回调 ──
+  // ── WebRTC 信令回调 ──
 
-  /// 本机 Opus 编码数据 → 发送给对端
-  void _onLocalAudioData(Uint8List opusData) {
-    _transceiver.sendAudioData(opusData);
+  /// 收到 SDP（offer 或 answer）
+  void _onWrtcSdp(String senderIp, String deviceId, String sdp, bool isOffer) {
+    _webrtc.onSdpReceived(deviceId, sdp, isOffer);
   }
 
-  /// 收到对端 Opus 语音数据 → 解码播放
-  void _onRemoteAudioData(String senderIp, Uint8List opusData) {
-    if (_talkStatus == TalkStatus.transmitting) return; // 半双工：发送时不接收
-    _audio.enqueueAudioData(senderIp, opusData);
+  /// 收到 ICE candidate
+  void _onWrtcIce(
+    String senderIp,
+    String deviceId,
+    String candidate,
+    String sdpMid,
+    int sdpMLineIndex,
+  ) {
+    _webrtc.onIceCandidateReceived(deviceId, candidate, sdpMid, sdpMLineIndex);
   }
+
+  /// 收到断开连接请求
+  void _onWrtcBye(String senderIp, String deviceId) {
+    _webrtc.onByeReceived(deviceId);
+  }
+
+  // ── 通话信号回调 ──
 
   /// 收到对端通话开始信号
   void _onRemoteVoiceStart(String senderIp, String senderName) {
     if (_talkStatus == TalkStatus.transmitting) return; // 半双工
     _talkStatus = TalkStatus.receiving;
     _receivingFrom = senderName;
-    _audio.onVoiceStartReceived(senderIp);
+    // WebRTC 自动播放远程音频，无需手动操作
     notifyListeners();
   }
 
   /// 收到对端通话结束信号
   void _onRemoteVoiceEnd(String senderIp) {
     if (_talkStatus != TalkStatus.receiving) return;
-    _audio.onVoiceEndReceived(senderIp);
     _talkStatus = TalkStatus.idle;
     _receivingFrom = '';
     notifyListeners();
@@ -396,7 +410,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── 文字消息 ──
 
-  /// 发送文字消息
   void sendMessage(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
@@ -415,8 +428,8 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  /// 收到对端文字消息
-  void _onRemoteMessage(String senderIp, String senderId, String senderName, String message) {
+  void _onRemoteMessage(
+      String senderIp, String senderId, String senderName, String message) {
     final msg = ChatMessage(
       id: '${senderId}_${DateTime.now().millisecondsSinceEpoch}',
       senderId: senderId,
@@ -427,7 +440,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     );
     _messages.add(msg);
     _unreadCount++;
-    // 收到消息时震动提醒
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
       HapticFeedback.lightImpact();
@@ -437,13 +449,11 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  /// 标记消息已读
   void markMessagesRead() {
     _unreadCount = 0;
     notifyListeners();
   }
 
-  /// 清空消息
   void clearMessages() {
     _messages.clear();
     _unreadCount = 0;
@@ -499,7 +509,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     return id;
   }
 
-  /// 启动页开关持久化（默认开启）
   static const _keySplashEnabled = 'splash_enabled';
 
   static Future<bool> loadSplashEnabled() async {
@@ -512,7 +521,6 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     await prefs.setBool(_keySplashEnabled, enabled);
   }
 
-  // ── 后台运行 & 通知持久化 ──
   static const _keyBackgroundEnabled = 'background_enabled';
   static const _keyNotificationEnabled = 'notification_enabled';
   static const _keyAudioConflictPause = 'audio_conflict_pause';
@@ -549,30 +557,23 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── 消息持久化 ──
 
-  /// 保存消息列表到本地存储
   Future<void> _saveMessages() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      // 只保存最近 _maxStoredMessages 条
       final toSave = _messages.length > _maxStoredMessages
           ? _messages.sublist(_messages.length - _maxStoredMessages)
           : _messages;
       final jsonList = toSave.map((m) => m.toJsonString()).toList();
       await prefs.setStringList(_keyMessages, jsonList);
-    } catch (_) {
-      // 保存失败静默处理
-    }
+    } catch (_) {}
   }
 
-  /// 从本地存储加载历史消息
   static Future<List<ChatMessage>> loadMessages() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonList = prefs.getStringList(_keyMessages);
       if (jsonList == null || jsonList.isEmpty) return [];
-      return jsonList
-          .map((str) => ChatMessage.fromJsonString(str))
-          .toList();
+      return jsonList.map((str) => ChatMessage.fromJsonString(str)).toList();
     } catch (_) {
       return [];
     }
@@ -589,6 +590,7 @@ class WalkieController extends ChangeNotifier with WidgetsBindingObserver {
     _audioConflict.dispose();
     _bgService.stopService();
     _audio.dispose();
+    _webrtc.dispose();
     _transceiver.dispose();
     _discovery.dispose();
     super.dispose();
